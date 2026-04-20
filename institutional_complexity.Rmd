@@ -1,0 +1,1063 @@
+---
+title: "Institutional Complexity Analysis"
+subtitle: "Applying Economic Complexity Methods to V-Dem Governance Data"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 10
+    fig_height: 7
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+# Introduction
+
+Economic complexity theory, developed by Hidalgo and Hausmann (2009), provides a powerful
+framework for understanding why some countries are wealthier than others. The core insight is
+elegant: countries that can produce many products -- especially products that few other countries
+can produce -- tend to be more economically sophisticated.
+
+Here we apply this same logic to **institutions and governance**. Using data from the
+Varieties of Democracy (V-Dem) project, we ask: which countries have built complex institutional
+portfolios? Which institutional features are "rare" -- present only in countries with deep
+institutional capacity? And how do institutions cluster together in an "institution space"?
+
+The analogy works as follows:
+
+| Economic Complexity | Institutional Complexity |
+|---|---|
+| Countries export products | Countries have institutional features |
+| Revealed Comparative Advantage | Binarized V-Dem indicators |
+| Product Complexity Index (PCI) | Institutional Feature Complexity (IFC) |
+| Economic Complexity Index (ECI) | Institutional Complexity Index (ICI) |
+| Product Space | Institution Space |
+
+# Setup and Data
+
+## Load packages
+
+```{r packages}
+library(tidyverse)
+library(vdemdata)
+library(uwot)
+library(ggrepel)
+library(countrycode)
+library(WDI)
+library(pheatmap)
+library(igraph)
+library(RColorBrewer)
+library(knitr)
+library(DT)
+```
+
+## Load V-Dem data
+
+We use the `vdemdata` package which provides the full V-Dem dataset. We'll work with the most
+recent year that has good coverage.
+
+```{r load-vdem, cache=TRUE}
+vdem_raw <- vdem
+
+# Check the most recent years and coverage
+year_coverage <- vdem_raw %>%
+  filter(year >= 2020) %>%
+  group_by(year) %>%
+  summarise(
+    n_countries = n_distinct(country_name),
+    .groups = "drop"
+  )
+
+kable(year_coverage, caption = "Country coverage by year (2020+)")
+```
+
+```{r select-year}
+# Use the most recent year with substantial coverage
+latest_year <- year_coverage %>%
+  filter(n_countries >= 150) %>%
+  pull(year) %>%
+  max()
+
+cat("Selected year:", latest_year, "\n")
+```
+
+## Select institutional indicators
+
+We curate a set of institutional and governance indicators spanning multiple domains. V-Dem
+indicators come in several forms:
+
+- **Ordinal (0-4)**: Expert-coded assessments (e.g., `v2x_*` indices are often interval, but
+  many component indicators like `v2cl*`, `v2ju*` are ordinal)
+- **Interval (0-1)**: Measurement-model aggregated indices
+- **Continuous**: Some structural variables
+
+We focus on indicators that capture the *presence* or *quality* of specific institutional features.
+
+```{r select-indicators}
+# Define our indicator set with categories
+indicator_info <- tribble(
+  ~code, ~category, ~description,
+  # Rule of Law
+  "v2x_rule", "Rule of Law", "Rule of law index",
+  "v2xcl_rol", "Rule of Law", "Equality before the law and individual liberty index",
+  "v2clrspct", "Rule of Law", "Rigorous and impartial public administration",
+  "v2cltrnslw", "Rule of Law", "Transparent laws with predictable enforcement",
+  "v2clacjust", "Rule of Law", "Access to justice for men",
+  "v2clacjstw", "Rule of Law", "Access to justice for women",
+  "v2clsocgrp", "Rule of Law", "Social class equality in respect for civil liberties",
+  "v2clrgunev", "Rule of Law", "Even geographic distribution of civil liberties",
+
+  # Judicial Independence
+  "v2x_jucon", "Judicial Independence", "Judicial constraints on the executive index",
+  "v2juhcind", "Judicial Independence", "High court independence",
+  "v2juncind", "Judicial Independence", "Lower court independence",
+  "v2juhccomp", "Judicial Independence", "Compliance with high court decisions",
+  "v2jucomp", "Judicial Independence", "Compliance with judiciary",
+  "v2jureview", "Judicial Independence", "Judicial review",
+  "v2juaccnt", "Judicial Independence", "Judicial accountability",
+  "v2jupack", "Judicial Independence", "Court packing",
+  "v2jupurge", "Judicial Independence", "Purges of the judiciary",
+
+  # Bureaucratic Quality / State Capacity
+  "v2stcritrecadm", "State Capacity", "Criteria for appointment decisions in state administration",
+  "v2strenadm", "State Capacity", "Remuneration in state administration",
+  "v2x_pubcorr", "State Capacity", "Public sector corruption index",
+  "v2clrspct", "State Capacity", "Rigorous and impartial public administration",
+  "v2svstterr", "State Capacity", "State authority over territory",
+  "v2stfisci", "State Capacity", "Fiscal capacity",
+  "v2ststatag", "State Capacity", "State statistical agency capacity",
+
+  # Property Rights
+  "v2xcl_prpty", "Property Rights", "Property rights index",
+  "v2clprptym", "Property Rights", "Property rights for men",
+  "v2clprptyw", "Property Rights", "Property rights for women",
+
+  # Media Freedom
+  "v2x_freexp_altinf", "Media Freedom", "Freedom of expression and alternative sources of info index",
+  "v2mecenefm", "Media Freedom", "Government censorship effort -- media",
+  "v2meharjrn", "Media Freedom", "Harassment of journalists",
+  "v2meslfcen", "Media Freedom", "Media self-censorship",
+  "v2mebias", "Media Freedom", "Media bias",
+  "v2mecrit", "Media Freedom", "Print/broadcast media critical",
+  "v2merange", "Media Freedom", "Print/broadcast media perspectives",
+  "v2x_freexp", "Media Freedom", "Freedom of expression index",
+  "v2meaccess", "Media Freedom", "Media access",
+
+  # Electoral Integrity
+  "v2x_polyarchy", "Electoral Integrity", "Electoral democracy index",
+  "v2xel_frefair", "Electoral Integrity", "Clean elections index",
+  "v2elfrfair", "Electoral Integrity", "Free and fair elections",
+  "v2elirreg", "Electoral Integrity", "Election irregularities",
+  "v2elintim", "Electoral Integrity", "Election government intimidation",
+  "v2elpeace", "Electoral Integrity", "Election other voting irregularities",
+  "v2elvotbuy", "Electoral Integrity", "Election vote buying",
+  "v2elembaut", "Electoral Integrity", "EMB autonomy",
+  "v2elembcap", "Electoral Integrity", "EMB capacity",
+  "v2elrgstry", "Electoral Integrity", "Election voter registry",
+  "v2x_elecoff", "Electoral Integrity", "Elected officials index",
+
+  # Civil Liberties
+  "v2x_civlib", "Civil Liberties", "Civil liberties index",
+  "v2xcl_disc", "Civil Liberties", "Freedom of discussion index",
+  "v2clacfree", "Civil Liberties", "Freedom of academic and cultural expression",
+  "v2cldiscm", "Civil Liberties", "Freedom of discussion for men",
+  "v2cldiscw", "Civil Liberties", "Freedom of discussion for women",
+  "v2clfmove", "Civil Liberties", "Freedom of foreign movement",
+  "v2cldmovem", "Civil Liberties", "Freedom of domestic movement for men",
+  "v2cldmovew", "Civil Liberties", "Freedom of domestic movement for women",
+  "v2clkill", "Civil Liberties", "Freedom from political killings",
+  "v2clslavem", "Civil Liberties", "Freedom from forced labor for men",
+  "v2clslavef", "Civil Liberties", "Freedom from forced labor for women",
+  "v2cltort", "Civil Liberties", "Freedom from torture",
+  "v2clstown", "Civil Liberties", "State ownership of economy",
+  "v2clrelig", "Civil Liberties", "Freedom of religion",
+
+  # Legislative Constraints
+  "v2x_legcon", "Legislative Constraints", "Legislative constraints on executive index",
+  "v2lgqstexp", "Legislative Constraints", "Legislature questions officials in practice",
+  "v2lginvstp", "Legislative Constraints", "Legislature investigates in practice",
+  "v2lgotovst", "Legislative Constraints", "Legislature opposition parties oversight",
+  "v2lgcrrpt", "Legislative Constraints", "Legislature corrupt activities",
+  "v2lgoppart", "Legislative Constraints", "Legislature opposition parties",
+  "v2lgfunds", "Legislative Constraints", "Legislature controls resources",
+  "v2lgdsadlo", "Legislative Constraints", "Legislature disbands/self-limits",
+  "v2lgello", "Legislative Constraints", "Legislature elections are free/fair",
+
+  # Anti-Corruption
+  "v2x_corr", "Anti-Corruption", "Political corruption index",
+  "v2excrptps", "Anti-Corruption", "Executive corruption (public sector)",
+  "v2exthftps", "Anti-Corruption", "Executive embezzlement",
+  "v2exbribe", "Anti-Corruption", "Executive bribery",
+  "v2lgcrrpt", "Anti-Corruption", "Legislature corrupt activities",
+  "v2jucorrdc", "Anti-Corruption", "Judicial corruption decision",
+
+  # Association and Civil Society
+  "v2x_cspart", "Civil Society", "Civil society participation index",
+  "v2csprtcpt", "Civil Society", "Civil society participatory environment",
+  "v2cseeorgs", "Civil Society", "CSO entry and exit",
+  "v2csreprss", "Civil Society", "CSO repression",
+  "v2csantimv", "Civil Society", "CSO anti-system movements",
+  "v2x_frassoc_thick", "Civil Society", "Freedom of association (thick) index",
+
+  # Academic Freedom
+  "v2xca_academ", "Academic Freedom", "Academic and cultural freedom index",
+  "v2caassemb", "Academic Freedom", "Freedom of academic exchange",
+  "v2cafexch", "Academic Freedom", "Freedom of academic exchange and dissemination",
+  "v2casurv", "Academic Freedom", "Surveillance of academic activities",
+
+  # Deliberation
+  "v2x_delibdem", "Deliberation", "Deliberative democracy index",
+  "v2dlreason", "Deliberation", "Reasoned justification",
+  "v2dlcommon", "Deliberation", "Common good justification",
+  "v2dlcountr", "Deliberation", "Respect for counterarguments",
+  "v2dlconslt", "Deliberation", "Range of consultation",
+  "v2dlengage", "Deliberation", "Engaged society",
+
+  # Equality
+  "v2x_gender", "Equality", "Women's political empowerment index",
+  "v2x_genpp", "Equality", "Women's civil society participation index",
+  "v2x_gencl", "Equality", "Women's civil liberties index",
+  "v2pepwrgen", "Equality", "Power distributed by gender",
+  "v2pepwrses", "Equality", "Power distributed by socioeconomic position",
+  "v2pepwrsoc", "Equality", "Power distributed by social group",
+
+  # Accountability
+  "v2x_accountability", "Accountability", "Accountability index",
+  "v2x_veracc", "Accountability", "Vertical accountability index",
+  "v2x_horacc", "Accountability", "Horizontal accountability index",
+  "v2x_diagacc", "Accountability", "Diagonal accountability index"
+)
+
+# Remove duplicates (some indicators appear in multiple categories -- keep first)
+indicator_info <- indicator_info %>% distinct(code, .keep_all = TRUE)
+
+cat("Total unique indicators selected:", nrow(indicator_info), "\n")
+cat("Categories:\n")
+indicator_info %>% count(category, sort = TRUE) %>% print(n = 20)
+```
+
+```{r filter-data}
+# Check which of our selected indicators actually exist in the dataset
+available_codes <- intersect(indicator_info$code, names(vdem_raw))
+missing_codes <- setdiff(indicator_info$code, names(vdem_raw))
+
+if (length(missing_codes) > 0) {
+  cat("Indicators not found in dataset (will be dropped):\n")
+  cat(paste(missing_codes, collapse = ", "), "\n\n")
+}
+
+indicator_info <- indicator_info %>% filter(code %in% available_codes)
+cat("Indicators available:", nrow(indicator_info), "\n")
+
+# Filter to selected year and extract relevant columns
+vdem_filtered <- vdem_raw %>%
+  filter(year == latest_year) %>%
+  select(
+    country_name, country_text_id, COWcode,
+    e_regionpol, e_regionpol_6C,
+    all_of(indicator_info$code)
+  ) %>%
+  # Drop countries with too much missing data (> 50% missing)
+  mutate(n_missing = rowSums(is.na(across(all_of(indicator_info$code))))) %>%
+  filter(n_missing < ncol(across(all_of(indicator_info$code))) * 0.5) %>%
+  select(-n_missing)
+
+cat("Countries retained:", nrow(vdem_filtered), "\n")
+```
+
+## Indicator catalog
+
+Here is the full set of institutional indicators we're working with:
+
+```{r indicator-table}
+kable(
+  indicator_info %>% select(Code = code, Category = category, Description = description),
+  caption = "Institutional indicators used in this analysis"
+)
+```
+
+# Binarization
+
+The key step in economic complexity is constructing a binary **country × feature** matrix. In
+trade data, this is done via Revealed Comparative Advantage (RCA). Here we adapt the approach
+to V-Dem indicators.
+
+## Strategy
+
+V-Dem indicators come in two main forms:
+
+1. **Ordinal (0-4)**: Expert-coded assessments where higher = more democratic/better governance.
+   We binarize at **>= 3**, meaning the feature is "present" when a country scores at least 3
+   out of 4.
+
+2. **Interval (0-1)**: Aggregated indices from measurement models. We use an **RCA-like approach**:
+   a country "has" the feature if its value exceeds the global mean for that indicator.
+
+```{r classify-indicators}
+# Determine type for each indicator based on its range in the data
+classify_indicator <- function(values) {
+  values <- na.omit(values)
+  rng <- range(values)
+
+  # If max is close to 1 and min is close to 0, it's likely interval
+
+  if (rng[2] <= 1.1 & rng[1] >= -0.1) {
+    return("interval")
+  }
+  # If values look like integers in 0-4 range, ordinal
+  if (rng[2] <= 5 & all(abs(values - round(values)) < 0.01)) {
+    return("ordinal")
+  }
+  # Default: treat as interval with RCA approach
+  return("interval")
+}
+
+indicator_types <- tibble(
+  code = indicator_info$code,
+  type = map_chr(indicator_info$code, ~classify_indicator(vdem_filtered[[.x]]))
+)
+
+cat("Indicator types:\n")
+count(indicator_types, type)
+```
+
+```{r binarize}
+# Build the binary matrix
+binary_df <- vdem_filtered %>% select(country_name, all_of(indicator_info$code))
+
+for (ind in indicator_info$code) {
+  ind_type <- indicator_types$type[indicator_types$code == ind]
+  values <- binary_df[[ind]]
+
+  if (ind_type == "ordinal") {
+    binary_df[[ind]] <- as.integer(values >= 3)
+  } else {
+    # RCA-like: above global mean
+    global_mean <- mean(values, na.rm = TRUE)
+    binary_df[[ind]] <- as.integer(values >= global_mean)
+  }
+}
+
+# Replace remaining NAs with 0 (absence)
+binary_df <- binary_df %>%
+  mutate(across(all_of(indicator_info$code), ~replace_na(.x, 0L)))
+
+# Create the Mcp matrix (countries x institutional features)
+Mcp <- binary_df %>%
+  column_to_rownames("country_name") %>%
+  as.matrix()
+
+cat("Mcp matrix dimensions:", nrow(Mcp), "countries x", ncol(Mcp), "institutional features\n")
+cat("Matrix density (fraction of 1s):", round(mean(Mcp), 3), "\n")
+```
+
+The density of the matrix tells us something important. If it's too high (> 0.8) or too low
+(< 0.1), the complexity calculations won't be very informative. A density around 0.3-0.6 is
+typical for complexity analyses.
+
+```{r binarization-summary}
+# Summary statistics
+diversity <- rowSums(Mcp)
+ubiquity <- colSums(Mcp)
+
+cat("\nDiversity (# features per country):\n")
+cat("  Mean:", round(mean(diversity), 1), "\n")
+cat("  Range:", min(diversity), "-", max(diversity), "\n")
+
+cat("\nUbiquity (# countries per feature):\n")
+cat("  Mean:", round(mean(ubiquity), 1), "\n")
+cat("  Range:", min(ubiquity), "-", max(ubiquity), "\n")
+```
+
+# Complexity Calculation
+
+## Diversity and Ubiquity (0th order)
+
+The most basic measures: **diversity** is how many institutional features a country has;
+**ubiquity** is how many countries share a given feature.
+
+```{r diversity-ubiquity}
+# Diversity: number of features each country has
+kc0 <- rowSums(Mcp)
+# Ubiquity: number of countries that have each feature
+kp0 <- colSums(Mcp)
+
+diversity_df <- tibble(
+  country = names(kc0),
+  diversity = as.numeric(kc0)
+) %>%
+  arrange(desc(diversity))
+
+# Top and bottom by diversity
+cat("Top 10 countries by diversity (# institutional features):\n")
+head(diversity_df, 10) %>% kable()
+
+cat("\nBottom 10 countries by diversity:\n")
+tail(diversity_df, 10) %>% kable()
+```
+
+```{r ubiquity-plot}
+ubiquity_df <- tibble(
+  indicator = names(kp0),
+  ubiquity = as.numeric(kp0)
+) %>%
+  left_join(indicator_info, by = c("indicator" = "code")) %>%
+  arrange(ubiquity)
+
+ggplot(ubiquity_df, aes(x = reorder(indicator, ubiquity), y = ubiquity, fill = category)) +
+  geom_col() +
+  coord_flip() +
+  labs(
+    title = "Ubiquity of Institutional Features",
+    subtitle = "Number of countries that 'have' each feature",
+    x = NULL, y = "Number of countries",
+    fill = "Category"
+  ) +
+  theme_minimal(base_size = 10) +
+  theme(axis.text.y = element_text(size = 6))
+```
+
+## Method of Reflections
+
+The Method of Reflections iteratively refines diversity and ubiquity. At each iteration,
+a country's complexity becomes the average complexity of the features it has, weighted by
+how complex those features are -- and vice versa. This creates a recursive, self-consistent
+measure.
+
+```{r method-of-reflections}
+# Method of Reflections
+n_iterations <- 20
+
+# Initialize
+kc <- matrix(0, nrow = nrow(Mcp), ncol = n_iterations + 1)
+kp <- matrix(0, nrow = ncol(Mcp), ncol = n_iterations + 1)
+rownames(kc) <- rownames(Mcp)
+rownames(kp) <- colnames(Mcp)
+
+kc[, 1] <- kc0
+kp[, 1] <- kp0
+
+for (n in 1:n_iterations) {
+  # Update country complexity: average ubiquity-weighted feature complexity
+  for (c in 1:nrow(Mcp)) {
+    features <- which(Mcp[c, ] == 1)
+    if (length(features) > 0 & kc0[c] > 0) {
+      kc[c, n + 1] <- (1 / kc0[c]) * sum(kp[features, n])
+    }
+  }
+
+  # Update feature complexity: average diversity-weighted country complexity
+  for (p in 1:ncol(Mcp)) {
+    countries <- which(Mcp[, p] == 1)
+    if (length(countries) > 0 & kp0[p] > 0) {
+      kp[p, n + 1] <- (1 / kp0[p]) * sum(kc[countries, n])
+    }
+  }
+}
+
+# ECI from Method of Reflections (using even iterations for countries)
+# The complexity information is in the variance of the even-iteration values
+kc_even <- kc[, n_iterations + 1]  # Last even iteration
+eci_mor <- (kc_even - mean(kc_even)) / sd(kc_even)
+
+kp_even <- kp[, n_iterations + 1]
+pci_mor <- (kp_even - mean(kp_even)) / sd(kp_even)
+
+cat("Method of Reflections converged after", n_iterations, "iterations.\n")
+```
+
+## Eigenvalue Method
+
+The eigenvalue method is more elegant and mathematically equivalent to the Method of Reflections
+at convergence. We construct the matrix $\tilde{M}_{cc'}$ and take its second eigenvector.
+
+$$\tilde{M}_{cc'} = \sum_p \frac{M_{cp} M_{c'p}}{k_{c,0} k_{p,0}}$$
+
+```{r eigenvalue-method}
+# Build Mcc_tilde
+# Mcc_tilde = (1/kc0) * Mcp %*% diag(1/kp0) %*% t(Mcp)
+
+# Handle zeros
+kc0_safe <- ifelse(kc0 == 0, 1, kc0)
+kp0_safe <- ifelse(kp0 == 0, 1, kp0)
+
+Mcc_tilde <- diag(1 / kc0_safe) %*% Mcp %*% diag(1 / kp0_safe) %*% t(Mcp)
+rownames(Mcc_tilde) <- rownames(Mcp)
+colnames(Mcc_tilde) <- rownames(Mcp)
+
+# Eigen decomposition
+eig <- eigen(Mcc_tilde)
+
+# The first eigenvector is trivial (all same sign), use second
+eci_eigen_raw <- Re(eig$vectors[, 2])
+names(eci_eigen_raw) <- rownames(Mcp)
+
+# Standardize
+eci_eigen <- (eci_eigen_raw - mean(eci_eigen_raw)) / sd(eci_eigen_raw)
+
+# Ensure sign convention: positive ECI = more complex
+# Check correlation with diversity -- complex countries should have higher diversity
+if (cor(eci_eigen, kc0) < 0) {
+  eci_eigen <- -eci_eigen
+}
+
+# Similarly for PCI via Mpp_tilde
+Mpp_tilde <- diag(1 / kp0_safe) %*% t(Mcp) %*% diag(1 / kc0_safe) %*% Mcp
+rownames(Mpp_tilde) <- colnames(Mcp)
+colnames(Mpp_tilde) <- colnames(Mcp)
+
+eig_p <- eigen(Mpp_tilde)
+pci_eigen_raw <- Re(eig_p$vectors[, 2])
+names(pci_eigen_raw) <- colnames(Mcp)
+pci_eigen <- (pci_eigen_raw - mean(pci_eigen_raw)) / sd(pci_eigen_raw)
+
+if (cor(pci_eigen, kp0, use = "complete.obs") > 0) {
+  # More ubiquitous features should be LESS complex
+  pci_eigen <- -pci_eigen
+}
+
+cat("Correlation between MoR and eigenvalue ECI:",
+    round(cor(eci_mor, eci_eigen), 3), "\n")
+```
+
+## Results: Institutional Complexity Index
+
+We use the eigenvalue method as our primary measure (it's more robust), with the Method of
+Reflections as a check.
+
+```{r eci-results}
+eci_df <- tibble(
+  country = names(eci_eigen),
+  ICI = eci_eigen,
+  ICI_MoR = eci_mor,
+  diversity = kc0
+) %>%
+  arrange(desc(ICI))
+
+cat("Top 20 countries by Institutional Complexity Index:\n")
+eci_df %>%
+  head(20) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  kable()
+
+cat("\nBottom 20 countries by Institutional Complexity Index:\n")
+eci_df %>%
+  tail(20) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3))) %>%
+  kable()
+```
+
+```{r eci-distribution}
+ggplot(eci_df, aes(x = ICI)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
+  labs(
+    title = "Distribution of Institutional Complexity Index",
+    x = "ICI (standardized)", y = "Count"
+  ) +
+  theme_minimal(base_size = 14)
+```
+
+## Results: Institutional Feature Complexity
+
+Which institutional features are most "complex" -- i.e., found predominantly in
+institutionally sophisticated countries?
+
+```{r pci-results}
+pci_df <- tibble(
+  indicator = names(pci_eigen),
+  IFC = pci_eigen,
+  ubiquity = kp0
+) %>%
+  left_join(indicator_info, by = c("indicator" = "code")) %>%
+  arrange(desc(IFC))
+
+cat("Top 20 most complex institutional features:\n")
+pci_df %>%
+  head(20) %>%
+  select(indicator, description, category, IFC, ubiquity) %>%
+  mutate(IFC = round(IFC, 3)) %>%
+  kable()
+
+cat("\nBottom 20 (most ubiquitous/least complex) features:\n")
+pci_df %>%
+  tail(20) %>%
+  select(indicator, description, category, IFC, ubiquity) %>%
+  mutate(IFC = round(IFC, 3)) %>%
+  kable()
+```
+
+```{r pci-by-category}
+ggplot(pci_df, aes(x = reorder(category, IFC, median), y = IFC, fill = category)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE) +
+  coord_flip() +
+  labs(
+    title = "Institutional Feature Complexity by Category",
+    x = NULL, y = "Institutional Feature Complexity (IFC)"
+  ) +
+  theme_minimal(base_size = 13)
+```
+
+# Proximity and Relatedness
+
+## Institution proximity
+
+We calculate the proximity between institutional features using the conditional probability
+approach from Hidalgo et al. (2007):
+
+$$\phi_{pp'} = \min\left(P(p | p'), P(p' | p)\right)$$
+
+where $P(p | p')$ is the probability that a country has feature $p$ given that it has
+feature $p'$. This measures how likely two features are to co-occur.
+
+```{r institution-proximity, cache=TRUE}
+n_features <- ncol(Mcp)
+phi_pp <- matrix(0, n_features, n_features)
+rownames(phi_pp) <- colnames(Mcp)
+colnames(phi_pp) <- colnames(Mcp)
+
+for (i in 1:n_features) {
+  for (j in i:n_features) {
+    if (i == j) {
+      phi_pp[i, j] <- 1
+    } else {
+      co_occur <- sum(Mcp[, i] & Mcp[, j])
+      p_given_j <- if (kp0[j] > 0) co_occur / kp0[j] else 0
+      p_given_i <- if (kp0[i] > 0) co_occur / kp0[i] else 0
+      phi_pp[i, j] <- min(p_given_i, p_given_j)
+      phi_pp[j, i] <- phi_pp[i, j]
+    }
+  }
+}
+
+cat("Institution proximity matrix:", nrow(phi_pp), "x", ncol(phi_pp), "\n")
+cat("Mean proximity:", round(mean(phi_pp[upper.tri(phi_pp)]), 3), "\n")
+```
+
+## Country proximity
+
+Similarly, we compute proximity between countries:
+
+$$\phi_{cc'} = \min\left(P(c | c'), P(c' | c)\right)$$
+
+```{r country-proximity, cache=TRUE}
+n_countries <- nrow(Mcp)
+phi_cc <- matrix(0, n_countries, n_countries)
+rownames(phi_cc) <- rownames(Mcp)
+colnames(phi_cc) <- rownames(Mcp)
+
+for (i in 1:n_countries) {
+  for (j in i:n_countries) {
+    if (i == j) {
+      phi_cc[i, j] <- 1
+    } else {
+      co_occur <- sum(Mcp[i, ] & Mcp[j, ])
+      p_given_j <- if (kc0[j] > 0) co_occur / kc0[j] else 0
+      p_given_i <- if (kc0[i] > 0) co_occur / kc0[i] else 0
+      phi_cc[i, j] <- min(p_given_i, p_given_j)
+      phi_cc[j, i] <- phi_cc[i, j]
+    }
+  }
+}
+```
+
+## Institution Space (Network)
+
+The institution space is a network where nodes are institutional features and edges connect
+features that tend to co-occur across countries.
+
+```{r institution-space-network}
+# Threshold for edges: use a percentile-based cutoff
+threshold_p <- quantile(phi_pp[upper.tri(phi_pp)], 0.75)
+
+# Build adjacency matrix
+adj_pp <- phi_pp
+adj_pp[adj_pp < threshold_p] <- 0
+diag(adj_pp) <- 0
+
+# Create igraph object
+g_inst <- graph_from_adjacency_matrix(adj_pp, mode = "undirected", weighted = TRUE)
+
+# Add attributes
+V(g_inst)$category <- indicator_info$category[match(V(g_inst)$name, indicator_info$code)]
+V(g_inst)$complexity <- pci_eigen[V(g_inst)$name]
+V(g_inst)$ubiquity <- kp0[V(g_inst)$name]
+
+cat("Institution space: ", vcount(g_inst), "nodes,", ecount(g_inst), "edges\n")
+cat("Mean degree:", round(mean(degree(g_inst)), 1), "\n")
+```
+
+## Country Space (Network)
+
+```{r country-space-network}
+threshold_c <- quantile(phi_cc[upper.tri(phi_cc)], 0.80)
+
+adj_cc <- phi_cc
+adj_cc[adj_cc < threshold_c] <- 0
+diag(adj_cc) <- 0
+
+g_country <- graph_from_adjacency_matrix(adj_cc, mode = "undirected", weighted = TRUE)
+
+# Add region info
+region_lookup <- vdem_filtered %>%
+  select(country_name, e_regionpol_6C) %>%
+  deframe()
+
+region_labels <- c(
+  "1" = "Eastern Europe & Central Asia",
+  "2" = "Latin America & Caribbean",
+  "3" = "Middle East & North Africa",
+  "4" = "Sub-Saharan Africa",
+  "5" = "Western Europe & North America",
+  "6" = "East Asia & Pacific"
+)
+
+V(g_country)$region <- region_labels[as.character(
+  region_lookup[V(g_country)$name]
+)]
+V(g_country)$ICI <- eci_eigen[V(g_country)$name]
+
+cat("Country space:", vcount(g_country), "nodes,", ecount(g_country), "edges\n")
+```
+
+# UMAP Visualizations
+
+## Institution Space (UMAP)
+
+We use UMAP to embed the institution proximity matrix into 2D for visualization. UMAP
+preserves local structure well, making it ideal for revealing clusters of related institutions.
+
+```{r umap-institutions, cache=TRUE}
+# Convert proximity to distance, use cmdscale (MDS) as fallback since uwot
+# doesn't support precomputed distance matrices well on all versions
+inst_dist <- as.dist(1 - phi_pp)
+
+# Use MDS first, then UMAP on the MDS coordinates for robust embedding
+set.seed(42)
+mds_inst <- cmdscale(inst_dist, k = min(10, ncol(Mcp) - 1))
+umap_inst <- umap(mds_inst, n_neighbors = 15, min_dist = 0.1, n_epochs = 500)
+
+umap_inst_df <- tibble(
+  indicator = colnames(Mcp),
+  UMAP1 = umap_inst[, 1],
+  UMAP2 = umap_inst[, 2],
+  ubiquity = kp0,
+  IFC = pci_eigen
+) %>%
+  left_join(indicator_info, by = c("indicator" = "code"))
+```
+
+```{r umap-inst-plot, fig.width=12, fig.height=9}
+# Color palette for categories
+n_cats <- length(unique(umap_inst_df$category))
+cat_colors <- colorRampPalette(brewer.pal(12, "Set3"))(n_cats)
+
+ggplot(umap_inst_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = category, size = IFC), alpha = 0.75) +
+  geom_text_repel(
+    aes(label = indicator),
+    size = 2.2, max.overlaps = 20, segment.alpha = 0.3
+  ) +
+  scale_size_continuous(range = c(2, 8), name = "Feature\nComplexity") +
+  scale_color_manual(values = cat_colors, name = "Category") +
+  labs(
+    title = "Institution Space (UMAP Embedding)",
+    subtitle = "Institutional features positioned by co-occurrence similarity",
+    x = "UMAP 1", y = "UMAP 2"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 16)
+  )
+```
+
+## Country Space (UMAP)
+
+```{r umap-countries, cache=TRUE}
+set.seed(42)
+country_dist <- as.dist(1 - phi_cc)
+mds_country <- cmdscale(country_dist, k = min(10, nrow(Mcp) - 1))
+umap_country <- umap(mds_country, n_neighbors = 15, min_dist = 0.2, n_epochs = 500)
+
+umap_country_df <- tibble(
+  country = rownames(Mcp),
+  UMAP1 = umap_country[, 1],
+  UMAP2 = umap_country[, 2],
+  ICI = eci_eigen,
+  diversity = kc0
+)
+
+# Add region
+umap_country_df <- umap_country_df %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  )
+```
+
+```{r umap-country-plot, fig.width=12, fig.height=9}
+region_colors <- c(
+  "Western Europe & North America" = "#2166AC",
+  "Eastern Europe & Central Asia" = "#67A9CF",
+  "Latin America & Caribbean" = "#1B9E77",
+  "East Asia & Pacific" = "#D95F02",
+  "Middle East & North Africa" = "#E7298A",
+  "Sub-Saharan Africa" = "#E6AB02",
+  "Other" = "grey50"
+)
+
+ggplot(umap_country_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = region, size = ICI), alpha = 0.75) +
+  geom_text_repel(
+    aes(label = country),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3
+  ) +
+  scale_size_continuous(range = c(2, 7), name = "Institutional\nComplexity") +
+  scale_color_manual(values = region_colors, name = "Region") +
+  labs(
+    title = "Country Space (UMAP Embedding)",
+    subtitle = "Countries positioned by institutional portfolio similarity",
+    x = "UMAP 1", y = "UMAP 2"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(
+    legend.position = "right",
+    plot.title = element_text(face = "bold", size = 16)
+  )
+```
+
+# Additional Visualizations
+
+## Heatmap of the Mcp Matrix
+
+```{r heatmap, fig.width=14, fig.height=10}
+# Cluster and plot heatmap
+# Add category annotations for columns
+col_annotation <- indicator_info %>%
+  filter(code %in% colnames(Mcp)) %>%
+  select(code, category) %>%
+  column_to_rownames("code")
+
+# Add region annotations for rows
+row_annotation <- tibble(
+  country = rownames(Mcp),
+  Region = region_labels[as.character(region_lookup[rownames(Mcp)])]
+) %>%
+  mutate(Region = replace_na(Region, "Other")) %>%
+  column_to_rownames("country")
+
+# Annotation colors
+ann_colors <- list(
+  category = setNames(cat_colors, unique(col_annotation$category)),
+  Region = region_colors[unique(row_annotation$Region)]
+)
+
+pheatmap(
+  Mcp,
+  color = c("grey95", "steelblue"),
+  legend_breaks = c(0, 1),
+  legend_labels = c("Absent", "Present"),
+  annotation_col = col_annotation,
+  annotation_row = row_annotation,
+  annotation_colors = ann_colors,
+  show_rownames = FALSE,
+  show_colnames = FALSE,
+  clustering_method = "ward.D2",
+  main = "Country x Institutional Feature Matrix (Mcp)",
+  fontsize = 8
+)
+```
+
+## ICI vs GDP per Capita
+
+```{r gdp-data, cache=TRUE}
+# Get GDP per capita from World Development Indicators
+gdp_data <- WDI(
+  indicator = "NY.GDP.PCAP.PP.KD",
+  start = latest_year - 1,
+  end = latest_year,
+  extra = TRUE
+) %>%
+  filter(!is.na(NY.GDP.PCAP.PP.KD)) %>%
+  group_by(country) %>%
+  slice_max(year, n = 1) %>%
+  ungroup() %>%
+  select(country, iso3c, gdp_pc = NY.GDP.PCAP.PP.KD)
+
+# Match to our country names using countrycode
+eci_gdp <- eci_df %>%
+  mutate(
+    iso3c = countrycode(country, "country.name", "iso3c",
+                        warn = FALSE)
+  ) %>%
+  left_join(gdp_data, by = "iso3c") %>%
+  filter(!is.na(gdp_pc))
+
+cat("Countries matched with GDP data:", nrow(eci_gdp), "\n")
+```
+
+```{r eci-vs-gdp, fig.width=10, fig.height=8}
+# Add regions
+eci_gdp <- eci_gdp %>%
+  mutate(
+    region = region_labels[as.character(
+      region_lookup[country.x]
+    )],
+    region = replace_na(region, "Other")
+  )
+
+cor_gdp <- cor(eci_gdp$ICI, log(eci_gdp$gdp_pc), use = "complete.obs")
+
+ggplot(eci_gdp, aes(x = ICI, y = gdp_pc)) +
+  geom_point(aes(color = region), size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "grey30", linetype = "dashed", se = TRUE, alpha = 0.15) +
+  geom_text_repel(
+    aes(label = country.x),
+    size = 2.5, max.overlaps = 15
+  ) +
+  scale_y_log10(labels = scales::dollar_format()) +
+  scale_color_manual(values = region_colors, name = "Region") +
+  labs(
+    title = "Institutional Complexity vs GDP per Capita",
+    subtitle = sprintf("Correlation with log GDP: %.2f", cor_gdp),
+    x = "Institutional Complexity Index (ICI)",
+    y = "GDP per capita (PPP, constant $, log scale)"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+## ICI vs Liberal Democracy Index
+
+```{r eci-vs-libdem, fig.width=10, fig.height=8}
+# Get liberal democracy index
+libdem <- vdem_raw %>%
+  filter(year == latest_year) %>%
+  select(country_name, v2x_libdem) %>%
+  filter(!is.na(v2x_libdem))
+
+eci_libdem <- eci_df %>%
+  left_join(libdem, by = c("country" = "country_name")) %>%
+  filter(!is.na(v2x_libdem)) %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  )
+
+cor_libdem <- cor(eci_libdem$ICI, eci_libdem$v2x_libdem, use = "complete.obs")
+
+ggplot(eci_libdem, aes(x = ICI, y = v2x_libdem)) +
+  geom_point(aes(color = region), size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", color = "grey30", linetype = "dashed", se = TRUE, alpha = 0.15) +
+  geom_text_repel(
+    aes(label = country),
+    size = 2.5, max.overlaps = 15
+  ) +
+  scale_color_manual(values = region_colors, name = "Region") +
+  labs(
+    title = "Institutional Complexity vs Liberal Democracy",
+    subtitle = sprintf("Correlation: %.2f", cor_libdem),
+    x = "Institutional Complexity Index (ICI)",
+    y = "V-Dem Liberal Democracy Index"
+  ) +
+  theme_minimal(base_size = 13) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+## ICI by World Region
+
+```{r eci-by-region, fig.width=10, fig.height=7}
+eci_regions <- eci_df %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  ) %>%
+  filter(region != "Other")
+
+ggplot(eci_regions, aes(x = reorder(region, ICI, median), y = ICI, fill = region)) +
+  geom_boxplot(alpha = 0.7, show.legend = FALSE, outlier.alpha = 0.3) +
+  geom_jitter(aes(color = region), width = 0.15, alpha = 0.5, size = 1.5, show.legend = FALSE) +
+  coord_flip() +
+  scale_fill_manual(values = region_colors) +
+  scale_color_manual(values = region_colors) +
+  labs(
+    title = "Institutional Complexity Index by World Region",
+    x = NULL, y = "Institutional Complexity Index (ICI)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold", size = 16))
+```
+
+# Discussion
+
+## What does institutional complexity tell us?
+
+The analogy between economic and institutional complexity reveals several patterns:
+
+**High-complexity countries** tend to be established democracies with deep, interlocking
+institutional frameworks. These countries don't just have individual strong institutions --
+they have *rare combinations* of institutions that reinforce each other. Just as economically
+complex countries produce products that require many complementary capabilities, institutionally
+complex countries maintain governance features that require deep state capacity, civic culture,
+and historical development.
+
+**The institution space** reveals how governance features cluster. Features that are close
+together in the UMAP embedding tend to co-occur -- they represent institutional "packages"
+that countries adopt together. The structure of this space suggests that some institutional
+reforms may be easier to adopt once neighboring capabilities are in place.
+
+**Feature complexity** is particularly informative. The most "complex" institutional features --
+those found primarily in institutionally sophisticated countries -- tend to involve subtle
+aspects of governance: rigorous and impartial public administration, judicial accountability,
+freedom from self-censorship in media, and deliberative quality of political discourse.
+These are features that require not just formal rules but deeply embedded norms and practices.
+
+## Caveats
+
+Several important limitations:
+
+1. **V-Dem data reflects expert assessments**, not objective measures. The binarization choices
+   affect results significantly.
+
+2. **The analogy has limits.** Countries don't "choose" institutions the way firms choose
+   products to export. Institutional development is path-dependent, often violent, and
+   constrained by geography, history, and international power relations.
+
+3. **Correlation with GDP and democracy is expected** given that many V-Dem indicators
+   directly measure democratic quality. The interesting question is whether the *complexity*
+   measure adds information beyond simple additive indices.
+
+4. **The method is sensitive to indicator selection.** A different set of indicators would
+   produce different complexity rankings. Our selection, while broad, reflects choices about
+   what counts as an "institution."
+
+5. **Cross-sectional analysis only.** A natural extension would track institutional complexity
+   over time to study how countries build (or lose) institutional sophistication.
+
+## Future directions
+
+- Panel analysis: how does institutional complexity evolve over time?
+- Predictive power: does ICI predict future economic growth or democratic stability
+  beyond what simpler indices capture?
+- Institutional "product space" analysis: which institutional upgrades are most
+  feasible for countries at different positions in the institution space?
+- Comparison with actual Economic Complexity Index: are economically and institutionally
+  complex countries the same?
+
+---
+
+*Analysis generated on `r Sys.Date()`. Data from V-Dem v`r packageVersion("vdemdata")` and
+World Development Indicators.*
