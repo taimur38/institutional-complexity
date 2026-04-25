@@ -1,0 +1,880 @@
+---
+title: "Institutions → Outcomes"
+subtitle: "Which institutional bundles explain fiscal, health, education, and complexity outcomes?"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 6.5
+    fig_height: 4.5
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+# Motivation
+
+The institutional-complexity analysis describes *how* institutional features cluster.
+This companion document asks the next question: **which institutional bundles predict
+real-world outcomes?** For each of ten cross-country outcomes (fiscal, health,
+education, economic complexity) we fit a flexible gradient-boosted model on the full
+V-Dem feature set and use SHAP values to surface (1) which individual institutional
+features matter most and (2) which *pairs* of features interact most strongly. Shallow
+trees (`max_depth = 3`) restrict the model to at-most-three-way interactions — the
+"bundle" hypothesis says pairwise and low-order interactions should dominate over
+single-feature main effects.
+
+This is a descriptive exercise, not a causal one. V-Dem scores and fiscal/health/
+education outcomes are co-determined over long horizons; no design here identifies a
+causal effect of institutions on outcomes.
+
+```{r packages}
+library(tidyverse)
+library(arrow)
+library(knitr)
+library(xgboost)
+library(shapviz)
+
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
+```
+
+# Data
+
+## Rebuild the institutional Mcp matrix
+
+We reproduce the V-Dem preprocessing from the main analysis: the most recent year
+with at least 150-country coverage, all C-type components with good coverage, min-max
+normalised to [0, 1]. See `institutional_complexity.Rmd` for detail.
+
+```{r build-mcp, cache=TRUE}
+vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("~/dev/shared-data/vdem/vdem_codebook.parquet")
+
+latest_year <- vdem_raw %>%
+  filter(year >= 2020) %>%
+  group_by(year) %>%
+  summarise(n_countries = n_distinct(country_name), .groups = "drop") %>%
+  filter(n_countries >= 150) %>%
+  pull(year) %>% max()
+
+component_codes <- vdem_codebook %>% filter(vartype == "C") %>% pull(tag)
+
+suffixes <- c("_codelow", "_codehigh", "_sd", "_osp", "_ord", "_mean", "_nr")
+all_cols <- names(vdem_raw)
+is_suffix <- sapply(all_cols, function(x) any(sapply(suffixes, function(s) endsWith(x, s))))
+is_numbered <- grepl("_\\d+$", all_cols)
+base_cols <- all_cols[!is_suffix & !is_numbered]
+candidate_codes <- intersect(component_codes, base_cols)
+
+latest_data <- vdem_raw %>% filter(year == latest_year)
+coverage <- sapply(candidate_codes, function(x) sum(!is.na(latest_data[[x]])))
+numeric_check <- sapply(candidate_codes, function(x) is.numeric(vdem_raw[[x]]))
+indicator_codes <- candidate_codes[coverage >= 150 & numeric_check]
+indicator_codes <- setdiff(indicator_codes, c("v2regopploc", "v2regsuploc"))
+
+indicator_info <- vdem_codebook %>%
+  filter(tag %in% indicator_codes) %>%
+  transmute(code = tag, description = name) %>%
+  distinct(code, .keep_all = TRUE)
+
+vdem_filtered <- vdem_raw %>%
+  filter(year == latest_year) %>%
+  select(country_name, country_text_id, all_of(indicator_info$code)) %>%
+  mutate(n_missing = rowSums(is.na(across(all_of(indicator_info$code))))) %>%
+  filter(n_missing < ncol(across(all_of(indicator_info$code))) * 0.5) %>%
+  select(-n_missing)
+
+cont_df <- vdem_filtered %>% select(country_name, all_of(indicator_info$code))
+for (ind in indicator_info$code) {
+  v <- cont_df[[ind]]; rng <- range(v, na.rm = TRUE)
+  cont_df[[ind]] <- if (rng[2] > rng[1]) (v - rng[1]) / (rng[2] - rng[1]) else 0
+}
+cont_df <- cont_df %>%
+  mutate(across(all_of(indicator_info$code), ~replace_na(.x, 0)))
+
+Mcp <- cont_df %>% column_to_rownames("country_name") %>% as.matrix()
+
+iso3_lookup <- vdem_filtered %>%
+  select(country_name, country_text_id) %>% deframe()
+
+cat("V-Dem year:", latest_year, "\n")
+cat("Mcp:", nrow(Mcp), "countries ×", ncol(Mcp), "features\n")
+```
+
+## Load outcome variables from the macro parquet
+
+Ten outcomes across four buckets. V-Dem's latest-coverage year runs ahead of
+several macro sources (HCI in particular is released only every 2–3 years),
+so for each country × outcome we take the **most recent non-NA value within the
+six years ending at `latest_year`**. This trades a little temporal precision for
+usable cross-country coverage. The "year used" is reported per outcome.
+`qog_bl_asymf` (Barro-Lee avg years of schooling) was dropped — its latest
+non-NA observation in this vintage is 2015, too stale to pair with a V-Dem 2025
+snapshot.
+
+```{r load-outcomes, cache=TRUE}
+outcome_meta <- tribble(
+  ~column,                 ~bucket,       ~label,                       ~transform, ~source,
+  "weo_ggr_ngdp",          "Fiscal",      "Revenue % GDP",              "none",     "macro",
+  "imf_tax_inc",           "Fiscal",      "Income tax % GDP",           "none",     "imf_world",
+  "wdi_sp_dyn_le00_in",    "Health",      "Life expectancy",            "none",     "macro",
+  "wdi_sp_dyn_imrt_in",    "Health",      "Infant mortality (log)",     "log",      "macro",
+  "wdi_sh_sta_mmrt",       "Health",      "Maternal mortality (log)",   "log",      "macro",
+  "wdi_hd_hci_ovrl",       "Education",   "Human Capital Index",        "none",     "macro",
+  "wdi_se_sec_enrr",       "Education",   "Secondary enrollment %",     "none",     "macro",
+  "atl_sitc_eci",          "Complexity",  "Economic Complexity (ECI)",  "none",     "macro",
+  "wdi_ne_exp_gnfs_zs",    "Trade",       "Exports % GDP",              "none",     "macro"
+)
+
+macro_cols <- outcome_meta %>% filter(source == "macro") %>% pull(column)
+macro <- read_parquet(
+  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", macro_cols)
+)
+
+# IMF WoRLD 2026: pull income-tax (TaxInc) keyed by ISO3, rename to imf_tax_inc
+# so it matches outcome_meta$column.
+imf_world <- suppressMessages(
+  readxl::read_excel("~/dev/shared-data/world-imf2026.xlsx",
+                     sheet = "Data", guess_max = 20000)
+) %>%
+  transmute(countrycodeiso = ISO3, year, imf_tax_inc = TaxInc) %>%
+  filter(!is.na(countrycodeiso))
+
+macro <- full_join(macro, imf_world, by = c("countrycodeiso", "year"))
+
+# For each outcome × country, pick the most recent non-NA value in the six
+# years ending at latest_year. This is still "cross-section-ish" but avoids
+# losing outcomes whose most recent vintage trails V-Dem.
+window <- seq(latest_year - 5, latest_year)
+
+pick_latest <- function(col) {
+  macro %>%
+    filter(year %in% window, !is.na(.data[[col]])) %>%
+    group_by(countrycodeiso) %>%
+    slice_max(year, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    transmute(iso3 = countrycodeiso,
+              !!col := .data[[col]],
+              !!paste0(col, "_year") := year)
+}
+
+outcome_wide <- reduce(
+  lapply(outcome_meta$column, pick_latest),
+  ~full_join(.x, .y, by = "iso3")
+)
+
+# Apply transforms in-place, carry the transform tag into column names
+for (i in seq_len(nrow(outcome_meta))) {
+  col <- outcome_meta$column[i]
+  tr  <- outcome_meta$transform[i]
+  if (tr == "log") {
+    outcome_wide[[col]] <- log(pmax(outcome_wide[[col]], .Machine$double.eps))
+  } else if (tr == "log1p") {
+    outcome_wide[[col]] <- log1p(pmax(outcome_wide[[col]], 0))
+  }
+}
+
+kable(outcome_meta,
+      caption = "Outcome variables. `log` indicates a natural-log transform was applied before modeling. Debt uses log1p because small-debt observations are near zero.")
+```
+
+## Join to Mcp
+
+```{r join}
+mcp_df <- as_tibble(Mcp, rownames = "country_name") %>%
+  mutate(iso3 = unname(iso3_lookup[country_name])) %>%
+  relocate(iso3)
+
+analysis_df <- mcp_df %>%
+  inner_join(outcome_wide %>% select(iso3, any_of(outcome_meta$column)),
+             by = "iso3")
+
+cat("Rows in analysis frame:", nrow(analysis_df), "\n")
+cat("Countries in Mcp but missing macro match:",
+    sum(!mcp_df$iso3 %in% outcome_wide$iso3), "\n\n")
+
+feature_cols <- indicator_info$code
+# Build as a fresh double matrix — xgboost 2.x errors on misaligned pointers
+# when the matrix comes from tibble -> as.matrix() coercion.
+X_mat <- matrix(as.double(as.matrix(analysis_df[, feature_cols])),
+                nrow = nrow(analysis_df), ncol = length(feature_cols),
+                dimnames = list(analysis_df$iso3, feature_cols))
+
+year_cols <- paste0(outcome_meta$column, "_year")
+year_info <- outcome_wide %>%
+  filter(iso3 %in% analysis_df$iso3) %>%
+  select(any_of(year_cols)) %>%
+  summarise(across(everything(),
+    ~sprintf("%s (median %s)",
+             paste(range(.x, na.rm = TRUE), collapse = "–"),
+             median(.x, na.rm = TRUE)))) %>%
+  pivot_longer(everything(), names_to = "ycol", values_to = "year_range") %>%
+  mutate(column = sub("_year$", "", ycol))
+
+outcome_coverage <- outcome_meta %>%
+  rowwise() %>%
+  mutate(n = sum(!is.na(analysis_df[[column]]))) %>%
+  ungroup() %>%
+  left_join(year_info %>% select(column, year_range), by = "column")
+kable(outcome_coverage %>% select(bucket, label, column, transform, n, year_range),
+      caption = "Per-outcome country coverage and the range of years used in the joined analysis frame.")
+```
+
+# Modeling
+
+## Pipeline
+
+For each outcome we fit XGBoost at each of four tree depths, `max_depth in {3, 4, 5, 6}`.
+Shallower trees cap the interaction order the model can learn — depth 3 allows up to
+three-way interactions, depth 6 up to six-way. Out-of-sample R^2 is computed from
+5-fold CV predictions at each depth; comparing the R^2 curve across depths per
+outcome is the "how much does bundle *size* matter" diagnostic.
+
+Other hyperparameters are held fixed: `eta = 0.05`, `subsample = 0.8`,
+`colsample_bytree = 0.8`, `min_child_weight = 5` (the small N makes this last one
+important — it prevents leaves from specializing on one or two countries).
+
+```{r pipeline}
+base_params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 5,
+  verbosity = 0
+)
+
+# Given a fitted booster, walk every leaf back to the root. For each leaf,
+# collect the UNIQUE set of features used on splits along the path and
+# weight it by the leaf's Cover (sum of Hessians ~ samples reaching the leaf).
+# Return a tibble: features (canonical|-joined), size, weight.
+extract_bundles <- function(model, feature_names) {
+  dt <- xgboost::xgb.model.dt.tree(feature_names = feature_names, model = model)
+  internal <- dt[Feature != "Leaf"]
+  children <- bind_rows(
+    internal %>% select(parent = ID, child = Yes),
+    internal %>% select(parent = ID, child = No),
+    internal %>% select(parent = ID, child = Missing)
+  ) %>% filter(!is.na(child), child != "")
+  parent_of  <- setNames(children$parent, children$child)
+  feature_of <- setNames(dt$Feature, dt$ID)
+
+  leaves <- dt[Feature == "Leaf"]
+  bundle_rows <- vector("list", nrow(leaves))
+  for (i in seq_len(nrow(leaves))) {
+    id <- leaves$ID[i]
+    cover <- leaves$Cover[i]
+    feats <- character()
+    cur <- id
+    while (!is.na(parent_of[cur]) && cur %in% names(parent_of)) {
+      par <- unname(parent_of[cur])
+      feats <- c(feats, unname(feature_of[par]))
+      cur <- par
+    }
+    fs <- sort(unique(feats))
+    if (length(fs) == 0) next
+    bundle_rows[[i]] <- tibble(
+      features = paste(fs, collapse = "|"),
+      size = length(fs),
+      weight = cover
+    )
+  }
+
+  bind_rows(bundle_rows) %>%
+    group_by(features, size) %>%
+    summarise(weight = sum(weight), .groups = "drop") %>%
+    arrange(desc(weight))
+}
+
+fit_outcome <- function(col, label, X, y_full, depth, seed = 42) {
+  ok <- !is.na(y_full)
+  # Fresh double matrix to sidestep xgboost pointer-alignment errors.
+  X_ok <- matrix(as.double(X[ok, , drop = FALSE]),
+                 nrow = sum(ok), ncol = ncol(X),
+                 dimnames = list(rownames(X)[ok], colnames(X)))
+  y <- as.double(y_full[ok])
+  n <- length(y)
+
+  params <- c(base_params, list(max_depth = depth))
+  set.seed(seed)
+  dall <- xgb.DMatrix(data = X_ok, label = y)
+
+  cv <- xgb.cv(params = params, data = dall, nrounds = 1000,
+               nfold = 5, early_stopping_rounds = 40, verbose = 0)
+  best_nrounds <- cv$early_stop$best_iteration
+  if (is.null(best_nrounds) || length(best_nrounds) == 0) {
+    best_nrounds <- which.min(cv$evaluation_log$test_rmse_mean)
+  }
+
+  set.seed(seed)
+  folds <- sample(rep(1:5, length.out = n))
+  oos_pred <- numeric(n)
+  for (k in 1:5) {
+    tr <- folds != k; te <- folds == k
+    m <- xgb.train(params = params,
+                   data = xgb.DMatrix(X_ok[tr, , drop = FALSE], label = y[tr]),
+                   nrounds = best_nrounds, verbose = 0)
+    oos_pred[te] <- predict(m, X_ok[te, , drop = FALSE])
+  }
+  r2_oos <- 1 - sum((y - oos_pred)^2) / sum((y - mean(y))^2)
+
+  final <- xgb.train(params = params, data = dall,
+                     nrounds = best_nrounds, verbose = 0)
+
+  contrib <- predict(final, X_ok, predcontrib = TRUE)
+  shap_main <- contrib[, -ncol(contrib), drop = FALSE]
+  colnames(shap_main) <- colnames(X_ok)
+  mean_abs_shap <- colMeans(abs(shap_main))
+
+  bundles <- extract_bundles(final, colnames(X_ok))
+
+  list(outcome = col, label = label, depth = depth, n = n,
+       r2_oos = r2_oos, best_nrounds = best_nrounds,
+       model = final, X = X_ok, y = y,
+       shap_main = shap_main, mean_abs_shap = mean_abs_shap,
+       bundles = bundles)
+}
+```
+
+## Depth sweep
+
+```{r run-sweep, cache=TRUE}
+depths <- 3:6
+results <- list()
+for (i in seq_len(nrow(outcome_meta))) {
+  col <- outcome_meta$column[i]
+  results[[col]] <- list()
+  y_full <- analysis_df[[col]]
+  for (d in depths) {
+    cat("Fitting:", col, "@ depth", d, "\n")
+    results[[col]][[as.character(d)]] <-
+      fit_outcome(col, outcome_meta$label[i], X_mat, y_full, depth = d)
+  }
+}
+```
+
+```{r sweep-table}
+sweep_df <- map_dfr(results, function(outcome_res) {
+  map_dfr(outcome_res, function(r) {
+    tibble(
+      bucket  = outcome_meta$bucket[outcome_meta$column == r$outcome],
+      label   = r$label,
+      depth   = r$depth,
+      n       = r$n,
+      r2_oos  = r$r2_oos,
+      nrounds = r$best_nrounds
+    )
+  })
+})
+
+sweep_wide <- sweep_df %>%
+  select(bucket, label, depth, r2_oos) %>%
+  pivot_wider(names_from = depth, values_from = r2_oos,
+              names_prefix = "d") %>%
+  mutate(across(starts_with("d"), ~round(.x, 3))) %>%
+  arrange(bucket, desc(d3))
+
+kable(sweep_wide,
+      caption = "Out-of-sample R^2 by outcome and max_depth. Each column is a fit with that interaction cap.")
+```
+
+```{r sweep-plot, fig.height=5}
+best_depth_df <- sweep_df %>%
+  group_by(label) %>%
+  slice_max(r2_oos, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+ggplot(sweep_df, aes(x = depth, y = r2_oos, color = bucket, group = label)) +
+  geom_line(alpha = 0.8, linewidth = 0.6) +
+  geom_point(size = 1.8, alpha = 0.8) +
+  geom_point(data = best_depth_df, color = highlight, size = 3, shape = 1,
+             stroke = 1.2) +
+  ggrepel::geom_text_repel(
+    data = best_depth_df, aes(label = label),
+    size = 2.6, segment.alpha = 0.3, max.overlaps = Inf,
+    show.legend = FALSE, box.padding = 0.4
+  ) +
+  scale_x_continuous(breaks = depths) +
+  labs(x = "max_depth (interaction order cap)",
+       y = "Out-of-sample R^2",
+       subtitle = "Red ring marks the best depth per outcome") +
+  theme(legend.position = "bottom")
+```
+
+```{r best-depth-table}
+best_depth_df %>%
+  transmute(Bucket = bucket, Outcome = label,
+            `Best depth` = depth, `Best R^2` = round(r2_oos, 3),
+            `R^2 @ d3` = round(sweep_wide$d3[match(label, sweep_wide$label)], 3),
+            Gain = round(r2_oos - sweep_wide$d3[match(label, sweep_wide$label)], 3)) %>%
+  arrange(Bucket, desc(Gain)) %>%
+  kable(caption = "Best depth per outcome. `Gain` = best R^2 minus R^2 at depth 3 — i.e. how much moving beyond three-way bundles actually helps.")
+```
+
+# Per-outcome detail (at best depth)
+
+Each outcome's section below uses the model at its best-performing depth. We show
+(1) a SHAP beeswarm of the top individual features — i.e. where each feature falls
+across the country distribution and how it pushes predictions — and (2) the top
+**feature bundles** of each size, extracted by walking the tree leaves. Bundle
+weight = sum of leaf `Cover` for all leaves whose path uses exactly that set of
+features; high-weight bundles are conjunctions of features the model relies on
+repeatedly across many countries.
+
+```{r desc-lookup}
+desc_lookup <- setNames(indicator_info$description, indicator_info$code)
+
+short_desc <- function(codes, max_len = 40) {
+  d <- desc_lookup[codes]
+  ifelse(is.na(d), codes, paste0(codes, ": ", str_trunc(d, max_len)))
+}
+
+format_bundle <- function(feature_str, max_len = 35) {
+  feats <- strsplit(feature_str, "\\|")[[1]]
+  labs  <- ifelse(feats %in% names(desc_lookup),
+                  paste0(feats, ": ", str_trunc(desc_lookup[feats], max_len)),
+                  feats)
+  paste(labs, collapse = "\n+ ")
+}
+```
+
+```{r per-outcome-plots, fig.width=6.5, fig.height=9, results='asis'}
+for (i in seq_len(nrow(outcome_meta))) {
+  all_depths <- results[[outcome_meta$column[i]]]
+  r <- best_depth_df %>%
+    filter(label == outcome_meta$label[i]) %>%
+    pull(depth) %>%
+    as.character() %>%
+    (\(d) all_depths[[d]])()
+  if (is.null(r)) next
+
+  cat("\n\n## ", r$label, "\n\n", sep = "")
+  cat("*N = ", r$n, " | best depth = ", r$depth,
+      " | OOS R^2 = ", round(r$r2_oos, 3),
+      " | nrounds = ", r$best_nrounds, "*\n\n", sep = "")
+
+  # SHAP beeswarm, top 15 features by mean |SHAP|
+  top_feats <- names(sort(r$mean_abs_shap, decreasing = TRUE))[1:15]
+  readable <- short_desc(top_feats)
+  shap_top <- r$shap_main[, top_feats, drop = FALSE]
+  X_top    <- as.data.frame(r$X[, top_feats, drop = FALSE])
+  colnames(shap_top) <- readable
+  colnames(X_top)    <- readable
+  sv <- shapviz(shap_top, X = X_top)
+  print(sv_importance(sv, kind = "beeswarm", max_display = 15) +
+        labs(title = NULL))
+
+  # Top bundles by size 2, 3, 4 (if depth allows)
+  for (k in intersect(2:min(4, r$depth), unique(r$bundles$size))) {
+    top_k <- r$bundles %>%
+      filter(size == k) %>%
+      head(8) %>%
+      mutate(bundle_label = map_chr(features, format_bundle),
+             bundle_label = fct_reorder(bundle_label, weight))
+    if (nrow(top_k) == 0) next
+    p <- ggplot(top_k, aes(x = weight, y = bundle_label)) +
+      geom_col(fill = gl$brand_blue, alpha = 0.85) +
+      labs(x = "Bundle weight (sum of leaf Cover)",
+           y = NULL,
+           subtitle = paste0("Top size-", k, " feature bundles"))
+    print(p)
+  }
+  cat("\n\n")
+}
+```
+
+# Two-PC summary
+
+The ML model treats each of ~60 V-Dem features as its own knob. But these features
+are highly collinear: if we run a PCA on the Mcp matrix, two or three principal
+components will usually capture most of the variation across countries. That
+suggests a simpler exercise: **project each country into the first two principal
+components, split the plane into quadrants, and ask what each quadrant means for
+outcomes.** If the first two PCs explain most of the outcome signal too, the
+quadrant labels tell a compact story about what bundles of institutional
+arrangements tend to produce what outcomes.
+
+## PCA on Mcp
+
+We center and scale each V-Dem feature before PCA (`prcomp` with `scale. = TRUE`)
+so that the min-max normalisation earlier in the pipeline doesn't let
+wider-variance features dominate the rotation.
+
+```{r pca-fit, cache=TRUE}
+pca <- prcomp(X_mat, center = TRUE, scale. = TRUE)
+var_exp <- pca$sdev^2 / sum(pca$sdev^2)
+cum_var <- cumsum(var_exp)
+
+tibble(PC = seq_along(var_exp),
+       `Variance explained` = round(var_exp, 3),
+       `Cumulative` = round(cum_var, 3)) %>%
+  head(10) %>%
+  kable(caption = "Share of Mcp variance explained by the first 10 principal components.")
+```
+
+```{r pca-loadings}
+loadings <- as_tibble(pca$rotation[, 1:2], rownames = "code") %>%
+  left_join(indicator_info, by = "code")
+
+bind_rows(
+  loadings %>% mutate(axis = "PC1", loading = PC1) %>%
+    slice_max(abs(loading), n = 10) %>%
+    select(axis, code, description, loading),
+  loadings %>% mutate(axis = "PC2", loading = PC2) %>%
+    slice_max(abs(loading), n = 10) %>%
+    select(axis, code, description, loading)
+) %>%
+  mutate(loading = round(loading, 3),
+         description = str_trunc(description, 45)) %>%
+  kable(caption = "Top 10 V-Dem features by absolute loading on PC1 and PC2. Loadings are signed; sign indicates direction along the axis.")
+```
+
+## Country scatter
+
+```{r pca-scatter, fig.height=6}
+scores <- as_tibble(pca$x[, 1:2]) %>%
+  mutate(iso3 = analysis_df$iso3) %>%
+  mutate(quadrant = case_when(
+    PC1 >= 0 & PC2 >= 0 ~ "Q1 (+,+)",
+    PC1 <  0 & PC2 >= 0 ~ "Q2 (-,+)",
+    PC1 <  0 & PC2 <  0 ~ "Q3 (-,-)",
+    PC1 >= 0 & PC2 <  0 ~ "Q4 (+,-)"
+  ))
+
+ggplot(scores, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, color = "grey75", linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "grey75", linetype = "dashed") +
+  geom_point(aes(color = quadrant), alpha = 0.6, size = 1.4) +
+  ggrepel::geom_text_repel(aes(label = iso3, color = quadrant),
+                           size = 2.4, max.overlaps = Inf,
+                           segment.alpha = 0.25, show.legend = FALSE) +
+  labs(x = sprintf("PC1 (%.1f%% var)", 100 * var_exp[1]),
+       y = sprintf("PC2 (%.1f%% var)", 100 * var_exp[2])) +
+  theme(legend.position = "bottom")
+```
+
+```{r pca-scatter-cambodia, fig.height=6}
+sea_peers <- c("KHM", "VNM", "LAO", "THA", "MMR")
+scores_focus <- scores %>% mutate(highlighted = iso3 %in% sea_peers)
+
+ggplot(scores_focus, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, color = "grey75", linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "grey75", linetype = "dashed") +
+  geom_point(alpha = 0.4, size = 1.4) +
+  geom_point(data = \(d) filter(d, highlighted),
+             color = highlight, size = 3) +
+  ggrepel::geom_text_repel(
+    data = \(d) filter(d, highlighted),
+    aes(label = iso3), color = highlight, size = 3.4,
+    max.overlaps = Inf, segment.alpha = 0.5, fontface = "bold"
+  ) +
+  labs(x = sprintf("PC1 (%.1f%% var)", 100 * var_exp[1]),
+       y = sprintf("PC2 (%.1f%% var)", 100 * var_exp[2]),
+       subtitle = "Cambodia and mainland Southeast Asian peers (KHM, VNM, LAO, THA, MMR)")
+```
+
+## Cambodia's institutional peers
+
+Geography is a guess at peerhood. With the PCA in hand we can ask the data who
+Cambodia's actual institutional neighbours are — countries with similar V-Dem
+fingerprints rather than similar coordinates on a map. We compute Euclidean
+distance from Cambodia to every other country in the first ten PCs (about 69%
+of total variance) and rank.
+
+```{r cambodia-institutional-peers}
+K_peer <- 10
+khm_scores <- pca$x["KHM", 1:K_peer]
+peer_dist <- pca$x[, 1:K_peer, drop = FALSE]
+peer_dist <- sqrt(rowSums(sweep(peer_dist, 2, khm_scores, "-")^2))
+
+country_lookup <- setNames(analysis_df$country_name, analysis_df$iso3)
+
+peer_rank <- tibble(iso3 = names(peer_dist),
+                    distance = peer_dist) %>%
+  mutate(country = country_lookup[iso3],
+         PC1 = pca$x[iso3, "PC1"],
+         PC2 = pca$x[iso3, "PC2"]) %>%
+  filter(iso3 != "KHM") %>%
+  arrange(distance)
+
+peer_rank %>%
+  head(15) %>%
+  mutate(across(c(distance, PC1, PC2), ~round(.x, 2))) %>%
+  transmute(rank = row_number(), iso3, country, distance, PC1, PC2) %>%
+  kable(caption = sprintf("Cambodia's 15 nearest institutional peers in the top-%d PC subspace (cumulative variance %.1f%%). Distance is Euclidean in PC space, which weights each PC by its variance.",
+                          K_peer, 100 * cum_var[K_peer]))
+```
+
+```{r pca-scatter-institutional-peers, fig.height=6}
+inst_peers <- peer_rank %>% head(8) %>% pull(iso3)
+scores_inst <- scores %>%
+  mutate(highlighted = iso3 %in% c("KHM", inst_peers))
+
+ggplot(scores_inst, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, color = "grey75", linetype = "dashed") +
+  geom_vline(xintercept = 0, color = "grey75", linetype = "dashed") +
+  geom_point(alpha = 0.4, size = 1.4) +
+  geom_point(data = \(d) filter(d, highlighted),
+             color = highlight, size = 3) +
+  ggrepel::geom_text_repel(
+    data = \(d) filter(d, highlighted),
+    aes(label = iso3), color = highlight, size = 3.4,
+    max.overlaps = Inf, segment.alpha = 0.5, fontface = "bold"
+  ) +
+  labs(x = sprintf("PC1 (%.1f%% var)", 100 * var_exp[1]),
+       y = sprintf("PC2 (%.1f%% var)", 100 * var_exp[2]),
+       subtitle = "Cambodia's 8 nearest institutional peers (top-10 PC subspace)")
+```
+
+```{r pca-geographic-peer-ranks}
+geo <- c("VNM", "LAO", "THA", "MMR")
+peer_rank %>%
+  filter(iso3 %in% geo) %>%
+  mutate(rank = match(iso3, peer_rank$iso3),
+         across(c(distance, PC1, PC2), ~round(.x, 2))) %>%
+  transmute(iso3, country, rank, distance, PC1, PC2) %>%
+  arrange(rank) %>%
+  kable(caption = "Where the geographic neighbours rank in Cambodia's institutional-similarity ordering. The closest is well outside the top 25 — geography and institutions disagree.")
+```
+
+## Cambodia and peers: actual vs predicted outcomes
+
+For each outcome we ask: **given this country's V-Dem fingerprint, what would
+a model that hasn't seen it expect its outcome to be?** The honest version is
+**leave-one-out**: for each focus country and each outcome, refit the
+best-depth model on every *other* country and predict the held-out one.
+Comparing this prediction to the country's actual outcome surfaces
+*institutional surprises* — countries that outperform or underperform what
+their institutional setup would predict.
+
+The residual is rescaled by the model's out-of-sample RMSE (derived from the
+5-fold CV R² in the depth sweep above), so a z-score of +1 means the country's
+actual outcome is one OOS-RMSE above what the model predicts.
+
+We look at six focus countries: Cambodia (KHM), its institutional twin
+Burundi (BDI), and its four mainland Southeast Asian geographic neighbours
+(VNM, LAO, THA, MMR). Outcomes with `log` transforms (infant and maternal
+mortality) are reported on the log scale; predictions and residuals are in
+log-units of mortality.
+
+```{r predict-focus-countries, cache=TRUE}
+focus_iso3 <- c("KHM", "BDI", "VNM", "LAO", "THA", "MMR")
+
+loo_predict_one <- function(r, focus_iso3, depth) {
+  X_ok <- r$X
+  y <- r$y
+  nrounds <- r$best_nrounds
+  prm <- list(objective = "reg:squarederror", eval_metric = "rmse",
+              eta = 0.05, subsample = 0.8, colsample_bytree = 0.8,
+              min_child_weight = 5, max_depth = depth, verbosity = 0)
+  preds <- setNames(rep(NA_real_, length(focus_iso3)), focus_iso3)
+  for (cc in focus_iso3) {
+    if (!cc %in% rownames(X_ok)) next
+    keep <- rownames(X_ok) != cc
+    set.seed(42)
+    m <- xgb.train(params = prm,
+                   data = xgb.DMatrix(X_ok[keep, , drop = FALSE], label = y[keep]),
+                   nrounds = nrounds, verbose = 0)
+    preds[cc] <- predict(m, X_ok[cc, , drop = FALSE])
+  }
+  preds
+}
+
+scorecard <- map_dfr(seq_len(nrow(outcome_meta)), function(i) {
+  col <- outcome_meta$column[i]
+  bd <- best_depth_df %>% filter(label == outcome_meta$label[i]) %>%
+    pull(depth) %>% as.character()
+  r <- results[[col]][[bd]]
+  if (is.null(r)) return(NULL)
+  pred_focus <- loo_predict_one(r, focus_iso3, depth = as.numeric(bd))
+  actual_focus <- analysis_df[[col]][match(focus_iso3, analysis_df$iso3)]
+  oos_rmse <- sqrt(var(r$y) * (1 - r$r2_oos))
+  tibble(iso3 = focus_iso3,
+         outcome = col,
+         label = outcome_meta$label[i],
+         bucket = outcome_meta$bucket[i],
+         actual = actual_focus,
+         predicted = unname(pred_focus),
+         residual = actual_focus - unname(pred_focus),
+         oos_rmse = oos_rmse,
+         z = residual / oos_rmse)
+})
+```
+
+```{r residual-heatmap, fig.height=4.2}
+heat_df <- scorecard %>%
+  filter(!is.na(z)) %>%
+  mutate(label = factor(label, levels = outcome_meta$label),
+         iso3  = factor(iso3,  levels = focus_iso3))
+
+ggplot(heat_df, aes(label, iso3, fill = z)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = sprintf("%+.1f", z)), size = 3) +
+  scale_fill_gradient2(low = highlight, mid = "grey95",
+                       high = gl$brand_blue, midpoint = 0,
+                       limits = c(-3, 3), oob = scales::squish,
+                       name = "Residual (SD units)") +
+  labs(x = NULL, y = NULL,
+       subtitle = "Actual minus model prediction, in residual SDs.\nBlue = country outperforms what its institutions predict; red = underperforms") +
+  theme(axis.text.x = element_text(angle = 25, hjust = 1),
+        legend.position = "bottom",
+        panel.grid = element_blank())
+```
+
+```{r scorecard-table}
+scorecard %>%
+  filter(!is.na(actual)) %>%
+  arrange(factor(iso3, levels = focus_iso3),
+          factor(label, levels = outcome_meta$label)) %>%
+  transmute(Country = iso3, Bucket = bucket, Outcome = label,
+            Actual = round(actual, 2),
+            Predicted = round(predicted, 2),
+            `Residual (raw)` = round(residual, 2),
+            `Residual (SD)`  = round(z, 2)) %>%
+  kable(caption = "Per-country actual vs predicted on each outcome. Residual SD > 0 means the country does better than its V-Dem fingerprint predicts; SD < 0 means worse.")
+```
+
+## Do two PCs explain the outcomes?
+
+For each outcome we fit a simple OLS regression `y ~ PC1 + PC2 + PC1:PC2`. The
+interaction term is what makes this a quadrant story — a pure additive fit can't
+tell Q1 apart from "a bit of Q2 plus a bit of Q4." Outcomes are z-scored so
+coefficients are directly comparable across rows.
+
+```{r pca-outcome-regression}
+scores_out <- scores %>%
+  left_join(outcome_wide %>% select(iso3, all_of(outcome_meta$column)),
+            by = "iso3")
+
+pca_lm <- map_dfr(seq_len(nrow(outcome_meta)), function(i) {
+  col <- outcome_meta$column[i]
+  d <- scores_out %>%
+    filter(!is.na(.data[[col]])) %>%
+    mutate(y = as.numeric(scale(.data[[col]])))
+  fit <- lm(y ~ PC1 + PC2 + PC1:PC2, data = d)
+  cf <- coef(fit)
+  tibble(bucket = outcome_meta$bucket[i],
+         label  = outcome_meta$label[i],
+         n      = nrow(d),
+         r2     = summary(fit)$r.squared,
+         PC1    = cf["PC1"],
+         PC2    = cf["PC2"],
+         `PC1:PC2` = cf["PC1:PC2"])
+})
+
+pca_lm %>%
+  mutate(across(c(r2, PC1, PC2, `PC1:PC2`), ~round(.x, 3))) %>%
+  arrange(bucket, desc(r2)) %>%
+  kable(caption = "OLS on z-scored outcomes. `PC1`, `PC2`, and `PC1:PC2` are standardized coefficients: how a one-standard-deviation move along each axis (or their product) shifts the outcome, in outcome-SD units. Compare to the best-depth XGBoost R^2 above to see how much signal lives outside the first two PCs.")
+```
+
+## Quadrant × outcome heatmap
+
+Each cell is the mean z-score of an outcome among countries in that quadrant.
+Blue = outcome runs high in this quadrant, red = runs low, grey = near the
+sample average. Reading one row across the four quadrants is the
+quadrant-labeling exercise: it says which combinations of institutional
+arrangements are associated with better fiscal / health / education /
+complexity outcomes.
+
+```{r pca-quadrant-heatmap, fig.height=5.5}
+quad_means <- scores_out %>%
+  pivot_longer(all_of(outcome_meta$column),
+               names_to = "outcome", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  left_join(outcome_meta %>% select(column, label, bucket),
+            by = c("outcome" = "column")) %>%
+  group_by(outcome) %>%
+  mutate(z = as.numeric(scale(value))) %>%
+  ungroup() %>%
+  group_by(bucket, label, quadrant) %>%
+  summarise(mean_z = mean(z), n = n(), .groups = "drop") %>%
+  mutate(label = factor(label, levels = rev(outcome_meta$label)))
+
+ggplot(quad_means, aes(quadrant, label, fill = mean_z)) +
+  geom_tile(color = "white", linewidth = 0.4) +
+  geom_text(aes(label = sprintf("%+.2f", mean_z)), size = 3) +
+  scale_fill_gradient2(low = highlight, mid = "grey95",
+                       high = gl$brand_blue, midpoint = 0,
+                       name = "Mean z-score") +
+  labs(x = NULL, y = NULL,
+       subtitle = "Outcome mean (z) by PCA quadrant") +
+  theme(legend.position = "bottom",
+        panel.grid = element_blank())
+```
+
+## Quadrant count
+
+```{r pca-quadrant-counts}
+scores %>%
+  count(quadrant) %>%
+  kable(caption = "Countries per quadrant. Small-N quadrants make the row means above noisier.")
+```
+
+# Top bundle per outcome
+
+For each outcome, the highest-weight bundle from its best-depth model — the
+*set* of V-Dem features that the most-frequented tree paths repeatedly split on.
+Weight is the total leaf cover routed through paths that use exactly this set,
+so the top bundle is the "decision rule" the model uses most often, not
+necessarily the bundle with the strongest direct correlation to the outcome.
+Each feature is listed with its V-Dem codebook description for interpretability.
+
+```{r top-bundle-per-outcome, results='asis'}
+for (i in seq_len(nrow(outcome_meta))) {
+  col <- outcome_meta$column[i]
+  bd <- best_depth_df %>% filter(label == outcome_meta$label[i]) %>%
+    pull(depth) %>% as.character()
+  r <- results[[col]][[bd]]
+  if (is.null(r) || nrow(r$bundles) == 0) next
+  best <- r$bundles %>% slice_max(weight, n = 1, with_ties = FALSE)
+  feats <- strsplit(best$features, "\\|")[[1]]
+
+  cat("\n## ", r$label, " (", outcome_meta$bucket[i], ")\n\n", sep = "")
+  cat("- **Best depth:** ", r$depth, "  \n", sep = "")
+  cat("- **OOS R\\textsuperscript{2}:** ", round(r$r2_oos, 3), "  \n", sep = "")
+  cat("- **Bundle size:** ", best$size, "  \n", sep = "")
+  cat("- **Bundle weight:** ", round(best$weight, 1),
+      " (top 1 of ", nrow(r$bundles), " distinct bundles)\n\n", sep = "")
+  cat("**Features in this bundle:**\n\n")
+  for (code in feats) {
+    desc <- desc_lookup[code]
+    if (is.na(desc)) desc <- "(no codebook description)"
+    cat("- `", code, "` — ", desc, "\n", sep = "")
+  }
+  cat("\n")
+}
+```
+
+# Notes and caveats
+
+- **Cross-sectional.** Everything here is a single-year snapshot. No causal claims.
+- **Transforms.** Infant and maternal mortality are modeled in logs. SHAP units for
+  those outcomes are log-units of mortality.
+- **Regularisation.** `min_child_weight = 5` keeps leaves from specialising on
+  one or two countries with N in the 130-190 range. CV-tuned `nrounds` plus the
+  depth sweep are the only moving pieces.
+- **Bundle extraction.** A bundle is the *set* of distinct V-Dem features used on
+  any split along the path from root to a given leaf. Weight sums leaf `Cover`
+  (approximately the number of training samples reaching that leaf), aggregated
+  across all leaves in all trees whose feature-set matches. Bundles are
+  direction-free — they say "these features co-occur in decisions" rather than
+  "high A + low B co-occur."
+- **Feature overlap.** V-Dem indicators are highly collinear. When two similar
+  features (e.g. two measures of executive respect for law) show up together in a
+  bundle, it may mean the model is using one as a noisy proxy for the other
+  rather than that they genuinely interact. Treat top bundles as hypotheses.

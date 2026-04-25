@@ -7,14 +7,14 @@ output:
   pdf_document:
     toc: true
     toc_depth: 3
-    fig_width: 10
-    fig_height: 7
+    fig_width: 6.5
+    fig_height: 4.5
     latex_engine: pdflatex
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(
-  echo = TRUE,
+  echo = FALSE,
   message = FALSE,
   warning = FALSE,
   fig.align = "center",
@@ -40,7 +40,7 @@ The analogy works as follows:
 | Economic Complexity | Institutional Complexity |
 |---|---|
 | Countries export products | Countries have institutional features |
-| Revealed Comparative Advantage | Binarized V-Dem indicators |
+| Revealed Comparative Advantage | Continuous V-Dem scores (0-1 normalized) |
 | Product Complexity Index (PCI) | Institutional Feature Complexity (IFC) |
 | Economic Complexity Index (ECI) | Institutional Complexity Index (ICI) |
 | Product Space | Institution Space |
@@ -51,25 +51,29 @@ The analogy works as follows:
 
 ```{r packages}
 library(tidyverse)
-library(vdemdata)
+library(arrow)
 library(uwot)
 library(ggrepel)
 library(countrycode)
 library(WDI)
 library(pheatmap)
 library(igraph)
-library(RColorBrewer)
 library(knitr)
 library(DT)
+library(patchwork)
+
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
 ```
 
 ## Load V-Dem data
 
-We use the `vdemdata` package which provides the full V-Dem dataset. We'll work with the most
-recent year that has good coverage.
+We load the full V-Dem dataset and codebook from the shared data directory
+(`~/dev/shared-data/vdem/`).
 
 ```{r load-vdem, cache=TRUE}
-vdem_raw <- vdem
+vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("~/dev/shared-data/vdem/vdem_codebook.parquet")
 
 # Check the most recent years and coverage
 year_coverage <- vdem_raw %>%
@@ -95,156 +99,81 @@ cat("Selected year:", latest_year, "\n")
 
 ## Select institutional indicators
 
-We curate a set of institutional and governance indicators spanning multiple domains. V-Dem
-indicators come in several forms:
+Rather than hand-picking a subset, we use **all non-index component indicators** from V-Dem.
+The V-Dem codebook classifies each variable by type:
 
-- **Ordinal (0-4)**: Expert-coded assessments (e.g., `v2x_*` indices are often interval, but
-  many component indicators like `v2cl*`, `v2ju*` are ordinal)
-- **Interval (0-1)**: Measurement-model aggregated indices
-- **Continuous**: Some structural variables
+- **C** (Component): Expert-coded assessments -- these are the actual institutional measures
+- **A** (Aggregate): Aggregated indices built from components
+- **D** (Derived): Derived/composite indices
 
-We focus on indicators that capture the *presence* or *quality* of specific institutional features.
+We use only type-C indicators, which represent the individual expert-coded assessments of
+institutional features. This avoids double-counting (indices are linear combinations of
+components) and gives us the most granular view of institutional capabilities.
+
+We further filter to indicators with good coverage in the selected year (>= 150 countries)
+and exclude text/name variables.
 
 ```{r select-indicators}
-# Define our indicator set with categories
-indicator_info <- tribble(
-  ~code, ~category, ~description,
-  # Rule of Law
-  "v2x_rule", "Rule of Law", "Rule of law index",
-  "v2xcl_rol", "Rule of Law", "Equality before the law and individual liberty index",
-  "v2clrspct", "Rule of Law", "Rigorous and impartial public administration",
-  "v2cltrnslw", "Rule of Law", "Transparent laws with predictable enforcement",
-  "v2clacjust", "Rule of Law", "Access to justice for men",
-  "v2clacjstw", "Rule of Law", "Access to justice for women",
-  "v2clsocgrp", "Rule of Law", "Social class equality in respect for civil liberties",
-  "v2clrgunev", "Rule of Law", "Even geographic distribution of civil liberties",
-
-  # Judicial Independence
-  "v2x_jucon", "Judicial Independence", "Judicial constraints on the executive index",
-  "v2juhcind", "Judicial Independence", "High court independence",
-  "v2juncind", "Judicial Independence", "Lower court independence",
-  "v2juhccomp", "Judicial Independence", "Compliance with high court decisions",
-  "v2jucomp", "Judicial Independence", "Compliance with judiciary",
-  "v2jureview", "Judicial Independence", "Judicial review",
-  "v2juaccnt", "Judicial Independence", "Judicial accountability",
-  "v2jupack", "Judicial Independence", "Court packing",
-  "v2jupurge", "Judicial Independence", "Purges of the judiciary",
-
-  # Bureaucratic Quality / State Capacity
-  "v2stcritrecadm", "State Capacity", "Criteria for appointment decisions in state administration",
-  "v2strenadm", "State Capacity", "Remuneration in state administration",
-  "v2x_pubcorr", "State Capacity", "Public sector corruption index",
-  "v2clrspct", "State Capacity", "Rigorous and impartial public administration",
-  "v2svstterr", "State Capacity", "State authority over territory",
-  "v2stfisci", "State Capacity", "Fiscal capacity",
-  "v2ststatag", "State Capacity", "State statistical agency capacity",
-
-  # Property Rights
-  "v2xcl_prpty", "Property Rights", "Property rights index",
-  "v2clprptym", "Property Rights", "Property rights for men",
-  "v2clprptyw", "Property Rights", "Property rights for women",
-
-  # Media Freedom
-  "v2x_freexp_altinf", "Media Freedom", "Freedom of expression and alternative sources of info index",
-  "v2mecenefm", "Media Freedom", "Government censorship effort -- media",
-  "v2meharjrn", "Media Freedom", "Harassment of journalists",
-  "v2meslfcen", "Media Freedom", "Media self-censorship",
-  "v2mebias", "Media Freedom", "Media bias",
-  "v2mecrit", "Media Freedom", "Print/broadcast media critical",
-  "v2merange", "Media Freedom", "Print/broadcast media perspectives",
-  "v2x_freexp", "Media Freedom", "Freedom of expression index",
-  "v2meaccess", "Media Freedom", "Media access",
-
-  # Electoral Integrity
-  "v2x_polyarchy", "Electoral Integrity", "Electoral democracy index",
-  "v2xel_frefair", "Electoral Integrity", "Clean elections index",
-  "v2elfrfair", "Electoral Integrity", "Free and fair elections",
-  "v2elirreg", "Electoral Integrity", "Election irregularities",
-  "v2elintim", "Electoral Integrity", "Election government intimidation",
-  "v2elpeace", "Electoral Integrity", "Election other voting irregularities",
-  "v2elvotbuy", "Electoral Integrity", "Election vote buying",
-  "v2elembaut", "Electoral Integrity", "EMB autonomy",
-  "v2elembcap", "Electoral Integrity", "EMB capacity",
-  "v2elrgstry", "Electoral Integrity", "Election voter registry",
-  "v2x_elecoff", "Electoral Integrity", "Elected officials index",
-
-  # Civil Liberties
-  "v2x_civlib", "Civil Liberties", "Civil liberties index",
-  "v2xcl_disc", "Civil Liberties", "Freedom of discussion index",
-  "v2clacfree", "Civil Liberties", "Freedom of academic and cultural expression",
-  "v2cldiscm", "Civil Liberties", "Freedom of discussion for men",
-  "v2cldiscw", "Civil Liberties", "Freedom of discussion for women",
-  "v2clfmove", "Civil Liberties", "Freedom of foreign movement",
-  "v2cldmovem", "Civil Liberties", "Freedom of domestic movement for men",
-  "v2cldmovew", "Civil Liberties", "Freedom of domestic movement for women",
-  "v2clkill", "Civil Liberties", "Freedom from political killings",
-  "v2clslavem", "Civil Liberties", "Freedom from forced labor for men",
-  "v2clslavef", "Civil Liberties", "Freedom from forced labor for women",
-  "v2cltort", "Civil Liberties", "Freedom from torture",
-  "v2clstown", "Civil Liberties", "State ownership of economy",
-  "v2clrelig", "Civil Liberties", "Freedom of religion",
-
-  # Legislative Constraints
-  "v2x_legcon", "Legislative Constraints", "Legislative constraints on executive index",
-  "v2lgqstexp", "Legislative Constraints", "Legislature questions officials in practice",
-  "v2lginvstp", "Legislative Constraints", "Legislature investigates in practice",
-  "v2lgotovst", "Legislative Constraints", "Legislature opposition parties oversight",
-  "v2lgcrrpt", "Legislative Constraints", "Legislature corrupt activities",
-  "v2lgoppart", "Legislative Constraints", "Legislature opposition parties",
-  "v2lgfunds", "Legislative Constraints", "Legislature controls resources",
-  "v2lgdsadlo", "Legislative Constraints", "Legislature disbands/self-limits",
-  "v2lgello", "Legislative Constraints", "Legislature elections are free/fair",
-
-  # Anti-Corruption
-  "v2x_corr", "Anti-Corruption", "Political corruption index",
-  "v2excrptps", "Anti-Corruption", "Executive corruption (public sector)",
-  "v2exthftps", "Anti-Corruption", "Executive embezzlement",
-  "v2exbribe", "Anti-Corruption", "Executive bribery",
-  "v2lgcrrpt", "Anti-Corruption", "Legislature corrupt activities",
-  "v2jucorrdc", "Anti-Corruption", "Judicial corruption decision",
-
-  # Association and Civil Society
-  "v2x_cspart", "Civil Society", "Civil society participation index",
-  "v2csprtcpt", "Civil Society", "Civil society participatory environment",
-  "v2cseeorgs", "Civil Society", "CSO entry and exit",
-  "v2csreprss", "Civil Society", "CSO repression",
-  "v2csantimv", "Civil Society", "CSO anti-system movements",
-  "v2x_frassoc_thick", "Civil Society", "Freedom of association (thick) index",
-
-  # Academic Freedom
-  "v2xca_academ", "Academic Freedom", "Academic and cultural freedom index",
-  "v2caassemb", "Academic Freedom", "Freedom of academic exchange",
-  "v2cafexch", "Academic Freedom", "Freedom of academic exchange and dissemination",
-  "v2casurv", "Academic Freedom", "Surveillance of academic activities",
-
-  # Deliberation
-  "v2x_delibdem", "Deliberation", "Deliberative democracy index",
-  "v2dlreason", "Deliberation", "Reasoned justification",
-  "v2dlcommon", "Deliberation", "Common good justification",
-  "v2dlcountr", "Deliberation", "Respect for counterarguments",
-  "v2dlconslt", "Deliberation", "Range of consultation",
-  "v2dlengage", "Deliberation", "Engaged society",
-
-  # Equality
-  "v2x_gender", "Equality", "Women's political empowerment index",
-  "v2x_genpp", "Equality", "Women's civil society participation index",
-  "v2x_gencl", "Equality", "Women's civil liberties index",
-  "v2pepwrgen", "Equality", "Power distributed by gender",
-  "v2pepwrses", "Equality", "Power distributed by socioeconomic position",
-  "v2pepwrsoc", "Equality", "Power distributed by social group",
-
-  # Accountability
-  "v2x_accountability", "Accountability", "Accountability index",
-  "v2x_veracc", "Accountability", "Vertical accountability index",
-  "v2x_horacc", "Accountability", "Horizontal accountability index",
-  "v2x_diagacc", "Accountability", "Diagonal accountability index"
+# Category labels based on V-Dem prefix naming convention
+prefix_categories <- c(
+  "el" = "Elections",
+  "ps" = "Political Parties",
+  "cl" = "Civil Liberties",
+  "ju" = "Judiciary",
+  "lg" = "Legislature",
+  "me" = "Media",
+  "ex" = "Executive",
+  "dl" = "Deliberation",
+  "ca" = "Academic & Cultural",
+  "cs" = "Civil Society",
+  "pe" = "Political Equality",
+  "st" = "State Capacity",
+  "sv" = "Sovereignty",
+  "dd" = "Direct Democracy",
+  "ed" = "Education",
+  "sm" = "Social Movements & Protest",
+  "re" = "Regime",
+  "te" = "Technology & Media Environment"
 )
 
-# Remove duplicates (some indicators appear in multiple categories -- keep first)
-indicator_info <- indicator_info %>% distinct(code, .keep_all = TRUE)
+# Select all C-type (component) indicators from the codebook
+component_codes <- vdem_codebook %>%
+  filter(vartype == "C") %>%
+  pull(tag)
 
-cat("Total unique indicators selected:", nrow(indicator_info), "\n")
-cat("Categories:\n")
+# Keep only v2* base indicators (no suffix variants, no text columns)
+suffixes <- c("_codelow", "_codehigh", "_sd", "_osp", "_ord", "_mean", "_nr")
+all_cols <- names(vdem_raw)
+is_suffix <- sapply(all_cols, function(x) any(sapply(suffixes, function(s) endsWith(x, s))))
+is_numbered <- grepl("_\\d+$", all_cols)
+base_cols <- all_cols[!is_suffix & !is_numbered]
+
+# Intersect with codebook C-type
+candidate_codes <- intersect(component_codes, base_cols)
+
+# Filter to selected year and check coverage
+latest_data <- vdem_raw %>% filter(year == latest_year)
+coverage <- sapply(candidate_codes, function(x) sum(!is.na(latest_data[[x]])))
+
+# Keep indicators with >= 150 countries and that are numeric
+numeric_check <- sapply(candidate_codes, function(x) is.numeric(vdem_raw[[x]]))
+indicator_codes <- candidate_codes[coverage >= 150 & numeric_check]
+
+# Build indicator_info from codebook
+indicator_info <- vdem_codebook %>%
+  filter(tag %in% indicator_codes) %>%
+  transmute(
+    code = tag,
+    description = name,
+    prefix = sub("^v[23](\\w{2}).*", "\\1", tag),
+    category = prefix_categories[prefix]
+  ) %>%
+  mutate(category = replace_na(category, "Other")) %>%
+  select(-prefix) %>%
+  distinct(code, .keep_all = TRUE)
+
+cat("Total component indicators selected:", nrow(indicator_info), "\n")
+cat("\nCategories:\n")
 indicator_info %>% count(category, sort = TRUE) %>% print(n = 20)
 ```
 
@@ -275,6 +204,47 @@ vdem_filtered <- vdem_raw %>%
   select(-n_missing)
 
 cat("Countries retained:", nrow(vdem_filtered), "\n")
+
+# Region lookups (used throughout)
+region_lookup <- vdem_filtered %>%
+  select(country_name, e_regionpol_6C) %>%
+  deframe()
+
+region_labels <- c(
+  "1" = "Eastern Europe & Central Asia",
+  "2" = "Latin America & Caribbean",
+  "3" = "Middle East & North Africa",
+  "4" = "Sub-Saharan Africa",
+  "5" = "Western Europe & North America",
+  "6" = "East Asia & Pacific"
+)
+```
+
+## Remove discrete variables
+
+V-Dem's C-type indicators are produced by a Bayesian IRT measurement model that converts
+ordinal expert codings into continuous latent scores (typically ranging from roughly -4 to +4).
+However, two indicators are discrete integers rather than continuous IRT output:
+
+- **v2regopploc** — "Regime opposition location" (integer-coded)
+- **v2regsuploc** — "Regime support location" (integer-coded)
+
+Since our continuous analysis requires all indicators to sit on comparable continuous scales,
+we drop these two.
+
+```{r remove-discrete}
+discrete_vars <- c("v2regopploc", "v2regsuploc")
+
+# Document what we're removing
+indicator_info %>%
+  filter(code %in% discrete_vars) %>%
+  select(Code = code, Category = category, Description = description) %>%
+  kable(caption = "Discrete variables removed from analysis")
+
+indicator_info <- indicator_info %>%
+  filter(!code %in% discrete_vars)
+
+cat("Indicators after removing discrete variables:", nrow(indicator_info), "\n")
 ```
 
 ## Indicator catalog
@@ -288,110 +258,80 @@ kable(
 )
 ```
 
-# Binarization
+# Continuous Mcp Matrix
 
-The key step in economic complexity is constructing a binary **country × feature** matrix. In
-trade data, this is done via Revealed Comparative Advantage (RCA). Here we adapt the approach
-to V-Dem indicators.
+Rather than binarizing indicators (which discards information about *how much* of a feature
+a country has), we construct a **continuous** country × feature matrix with values compressed
+to [0, 1]. This preserves the full variation in institutional quality across countries.
 
-## Strategy
+## Min-max normalization
 
-V-Dem indicators come in two main forms:
+Each indicator is rescaled to [0, 1] using min-max normalization across countries:
 
-1. **Ordinal (0-4)**: Expert-coded assessments where higher = more democratic/better governance.
-   We binarize at **>= 3**, meaning the feature is "present" when a country scores at least 3
-   out of 4.
+$$x_{cp}^{*} = \frac{x_{cp} - \min_c(x_{cp})}{\max_c(x_{cp}) - \min_c(x_{cp})}$$
 
-2. **Interval (0-1)**: Aggregated indices from measurement models. We use an **RCA-like approach**:
-   a country "has" the feature if its value exceeds the global mean for that indicator.
+This means 0 = worst observed score across all countries, 1 = best observed score. The
+continuous matrix can be used directly in EC-style calculations — higher values indicate
+stronger "presence" of a feature, analogous to higher export intensity in trade data.
 
-```{r classify-indicators}
-# Determine type for each indicator based on its range in the data
-classify_indicator <- function(values) {
-  values <- na.omit(values)
-  rng <- range(values)
-
-  # If max is close to 1 and min is close to 0, it's likely interval
-
-  if (rng[2] <= 1.1 & rng[1] >= -0.1) {
-    return("interval")
-  }
-  # If values look like integers in 0-4 range, ordinal
-  if (rng[2] <= 5 & all(abs(values - round(values)) < 0.01)) {
-    return("ordinal")
-  }
-  # Default: treat as interval with RCA approach
-  return("interval")
-}
-
-indicator_types <- tibble(
-  code = indicator_info$code,
-  type = map_chr(indicator_info$code, ~classify_indicator(vdem_filtered[[.x]]))
-)
-
-cat("Indicator types:\n")
-count(indicator_types, type)
-```
-
-```{r binarize}
-# Build the binary matrix
-binary_df <- vdem_filtered %>% select(country_name, all_of(indicator_info$code))
+```{r continuous-mcp}
+# Build the continuous 0-1 matrix
+cont_df <- vdem_filtered %>% select(country_name, all_of(indicator_info$code))
 
 for (ind in indicator_info$code) {
-  ind_type <- indicator_types$type[indicator_types$code == ind]
-  values <- binary_df[[ind]]
-
-  if (ind_type == "ordinal") {
-    binary_df[[ind]] <- as.integer(values >= 3)
+  values <- cont_df[[ind]]
+  rng <- range(values, na.rm = TRUE)
+  if (rng[2] > rng[1]) {
+    cont_df[[ind]] <- (values - rng[1]) / (rng[2] - rng[1])
   } else {
-    # RCA-like: above global mean
-    global_mean <- mean(values, na.rm = TRUE)
-    binary_df[[ind]] <- as.integer(values >= global_mean)
+    cont_df[[ind]] <- 0
   }
 }
 
-# Replace remaining NAs with 0 (absence)
-binary_df <- binary_df %>%
-  mutate(across(all_of(indicator_info$code), ~replace_na(.x, 0L)))
+# Replace remaining NAs with 0
+cont_df <- cont_df %>%
+  mutate(across(all_of(indicator_info$code), ~replace_na(.x, 0)))
 
-# Create the Mcp matrix (countries x institutional features)
-Mcp <- binary_df %>%
+# Create the continuous Mcp matrix
+Mcp <- cont_df %>%
   column_to_rownames("country_name") %>%
   as.matrix()
 
-cat("Mcp matrix dimensions:", nrow(Mcp), "countries x", ncol(Mcp), "institutional features\n")
-cat("Matrix density (fraction of 1s):", round(mean(Mcp), 3), "\n")
+cat("Continuous Mcp matrix dimensions:", nrow(Mcp), "countries x", ncol(Mcp), "features\n")
+cat("Value range:", round(min(Mcp), 3), "-", round(max(Mcp), 3), "\n")
+cat("Mean value:", round(mean(Mcp), 3), "\n")
+cat("Median value:", round(median(Mcp), 3), "\n")
 ```
 
-The density of the matrix tells us something important. If it's too high (> 0.8) or too low
-(< 0.1), the complexity calculations won't be very informative. A density around 0.3-0.6 is
-typical for complexity analyses.
+```{r mcp-summary}
+# Country-level summary: mean institutional score across features
+country_means <- rowMeans(Mcp)
+cat("\nMean institutional score by country:\n")
+cat("  Mean:", round(mean(country_means), 3), "\n")
+cat("  SD:", round(sd(country_means), 3), "\n")
+cat("  Range:", round(min(country_means), 3), "-", round(max(country_means), 3), "\n")
 
-```{r binarization-summary}
-# Summary statistics
-diversity <- rowSums(Mcp)
-ubiquity <- colSums(Mcp)
-
-cat("\nDiversity (# features per country):\n")
-cat("  Mean:", round(mean(diversity), 1), "\n")
-cat("  Range:", min(diversity), "-", max(diversity), "\n")
-
-cat("\nUbiquity (# countries per feature):\n")
-cat("  Mean:", round(mean(ubiquity), 1), "\n")
-cat("  Range:", min(ubiquity), "-", max(ubiquity), "\n")
+# Feature-level summary: mean score across countries
+feature_means <- colMeans(Mcp)
+cat("\nMean country score by feature:\n")
+cat("  Mean:", round(mean(feature_means), 3), "\n")
+cat("  SD:", round(sd(feature_means), 3), "\n")
+cat("  Range:", round(min(feature_means), 3), "-", round(max(feature_means), 3), "\n")
 ```
 
 # Complexity Calculation
 
 ## Diversity and Ubiquity (0th order)
 
-The most basic measures: **diversity** is how many institutional features a country has;
-**ubiquity** is how many countries share a given feature.
+With a continuous Mcp matrix, **diversity** becomes the sum of institutional scores across
+all features (total institutional intensity), and **ubiquity** becomes the sum across all
+countries for a given feature. These are the continuous generalizations of the binary count
+measures.
 
 ```{r diversity-ubiquity}
-# Diversity: number of features each country has
+# Diversity: sum of continuous feature scores per country
 kc0 <- rowSums(Mcp)
-# Ubiquity: number of countries that have each feature
+# Ubiquity: sum of continuous country scores per feature
 kp0 <- colSums(Mcp)
 
 diversity_df <- tibble(
@@ -408,7 +348,7 @@ cat("\nBottom 10 countries by diversity:\n")
 tail(diversity_df, 10) %>% kable()
 ```
 
-```{r ubiquity-plot}
+```{r ubiquity-plot, fig.height=6}
 ubiquity_df <- tibble(
   indicator = names(kp0),
   ubiquity = as.numeric(kp0)
@@ -416,28 +356,21 @@ ubiquity_df <- tibble(
   left_join(indicator_info, by = c("indicator" = "code")) %>%
   arrange(ubiquity)
 
-ggplot(ubiquity_df, aes(x = reorder(indicator, ubiquity), y = ubiquity, fill = category)) +
-  geom_col() +
-  coord_flip() +
-  labs(
-    title = "Ubiquity of Institutional Features",
-    subtitle = "Number of countries that 'have' each feature",
-    x = NULL, y = "Number of countries",
-    fill = "Category"
-  ) +
-  theme_minimal(base_size = 10) +
-  theme(axis.text.y = element_text(size = 6))
+ggplot(ubiquity_df, aes(x = ubiquity, fill = category)) +
+  geom_histogram(bins = 30, color = "white") +
+  labs(x = "Ubiquity (sum of country scores)", y = "Count of features", fill = "Category")
+
+save_fig("full", "ubiquity_distribution.pdf")
 ```
 
 ## Method of Reflections
 
-The Method of Reflections iteratively refines diversity and ubiquity. At each iteration,
-a country's complexity becomes the average complexity of the features it has, weighted by
-how complex those features are -- and vice versa. This creates a recursive, self-consistent
-measure.
+The Method of Reflections iteratively refines diversity and ubiquity. With continuous Mcp
+values, each iteration updates a country's score as the Mcp-weighted average of feature
+scores, and vice versa. This is the continuous generalization of the binary method.
 
 ```{r method-of-reflections}
-# Method of Reflections
+# Method of Reflections (continuous generalization)
 n_iterations <- 20
 
 # Initialize
@@ -450,26 +383,23 @@ kc[, 1] <- kc0
 kp[, 1] <- kp0
 
 for (n in 1:n_iterations) {
-  # Update country complexity: average ubiquity-weighted feature complexity
-  for (c in 1:nrow(Mcp)) {
-    features <- which(Mcp[c, ] == 1)
-    if (length(features) > 0 & kc0[c] > 0) {
-      kc[c, n + 1] <- (1 / kc0[c]) * sum(kp[features, n])
+  # Update country complexity: weighted average of feature complexity
+  for (c_idx in 1:nrow(Mcp)) {
+    if (kc0[c_idx] > 0) {
+      kc[c_idx, n + 1] <- (1 / kc0[c_idx]) * sum(Mcp[c_idx, ] * kp[, n])
     }
   }
 
-  # Update feature complexity: average diversity-weighted country complexity
-  for (p in 1:ncol(Mcp)) {
-    countries <- which(Mcp[, p] == 1)
-    if (length(countries) > 0 & kp0[p] > 0) {
-      kp[p, n + 1] <- (1 / kp0[p]) * sum(kc[countries, n])
+  # Update feature complexity: weighted average of country complexity
+  for (p_idx in 1:ncol(Mcp)) {
+    if (kp0[p_idx] > 0) {
+      kp[p_idx, n + 1] <- (1 / kp0[p_idx]) * sum(Mcp[, p_idx] * kc[, n])
     }
   }
 }
 
-# ECI from Method of Reflections (using even iterations for countries)
-# The complexity information is in the variance of the even-iteration values
-kc_even <- kc[, n_iterations + 1]  # Last even iteration
+# ECI from Method of Reflections
+kc_even <- kc[, n_iterations + 1]
 eci_mor <- (kc_even - mean(kc_even)) / sd(kc_even)
 
 kp_even <- kp[, n_iterations + 1]
@@ -561,13 +491,11 @@ eci_df %>%
 
 ```{r eci-distribution}
 ggplot(eci_df, aes(x = ICI)) +
-  geom_histogram(bins = 30, fill = "steelblue", color = "white", alpha = 0.8) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "red") +
-  labs(
-    title = "Distribution of Institutional Complexity Index",
-    x = "ICI (standardized)", y = "Count"
-  ) +
-  theme_minimal(base_size = 14)
+  geom_histogram(bins = 30, fill = gl$brand_blue, color = "white", alpha = 0.8) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = highlight) +
+  labs(x = "ICI (standardized)", y = "Count")
+
+save_fig("full", "eci_distribution.pdf")
 ```
 
 ## Results: Institutional Feature Complexity
@@ -603,26 +531,26 @@ pci_df %>%
 ggplot(pci_df, aes(x = reorder(category, IFC, median), y = IFC, fill = category)) +
   geom_boxplot(alpha = 0.7, show.legend = FALSE) +
   coord_flip() +
-  labs(
-    title = "Institutional Feature Complexity by Category",
-    x = NULL, y = "Institutional Feature Complexity (IFC)"
-  ) +
-  theme_minimal(base_size = 13)
+  labs(x = NULL, y = "Institutional Feature Complexity (IFC)")
+
+save_fig("full", "pci_by_category.pdf")
 ```
 
 # Proximity and Relatedness
 
-## Institution proximity
+## Method 1: Co-location proximity (EC-style)
 
-We calculate the proximity between institutional features using the conditional probability
-approach from Hidalgo et al. (2007):
+We calculate proximity between institutional features using a continuous generalization of
+the conditional probability approach from Hidalgo et al. (2007). With continuous Mcp values,
+co-occurrence becomes the dot product of feature columns, and conditioning becomes division
+by the feature's total weight:
 
-$$\phi_{pp'} = \min\left(P(p | p'), P(p' | p)\right)$$
+$$\phi_{pp'} = \min\left(\frac{\sum_c M_{cp} \cdot M_{cp'}}{\sum_c M_{cp'}}, \frac{\sum_c M_{cp} \cdot M_{cp'}}{\sum_c M_{cp}}\right)$$
 
-where $P(p | p')$ is the probability that a country has feature $p$ given that it has
-feature $p'$. This measures how likely two features are to co-occur.
+This is the natural continuous extension: when Mcp is binary, this reduces to the standard
+min conditional probability.
 
-```{r institution-proximity, cache=TRUE}
+```{r colocation-feature-proximity, cache=TRUE}
 n_features <- ncol(Mcp)
 phi_pp <- matrix(0, n_features, n_features)
 rownames(phi_pp) <- colnames(Mcp)
@@ -633,7 +561,7 @@ for (i in 1:n_features) {
     if (i == j) {
       phi_pp[i, j] <- 1
     } else {
-      co_occur <- sum(Mcp[, i] & Mcp[, j])
+      co_occur <- sum(Mcp[, i] * Mcp[, j])
       p_given_j <- if (kp0[j] > 0) co_occur / kp0[j] else 0
       p_given_i <- if (kp0[i] > 0) co_occur / kp0[i] else 0
       phi_pp[i, j] <- min(p_given_i, p_given_j)
@@ -642,17 +570,11 @@ for (i in 1:n_features) {
   }
 }
 
-cat("Institution proximity matrix:", nrow(phi_pp), "x", ncol(phi_pp), "\n")
+cat("Co-location feature proximity matrix:", nrow(phi_pp), "x", ncol(phi_pp), "\n")
 cat("Mean proximity:", round(mean(phi_pp[upper.tri(phi_pp)]), 3), "\n")
 ```
 
-## Country proximity
-
-Similarly, we compute proximity between countries:
-
-$$\phi_{cc'} = \min\left(P(c | c'), P(c' | c)\right)$$
-
-```{r country-proximity, cache=TRUE}
+```{r colocation-country-proximity, cache=TRUE}
 n_countries <- nrow(Mcp)
 phi_cc <- matrix(0, n_countries, n_countries)
 rownames(phi_cc) <- rownames(Mcp)
@@ -663,7 +585,7 @@ for (i in 1:n_countries) {
     if (i == j) {
       phi_cc[i, j] <- 1
     } else {
-      co_occur <- sum(Mcp[i, ] & Mcp[j, ])
+      co_occur <- sum(Mcp[i, ] * Mcp[j, ])
       p_given_j <- if (kc0[j] > 0) co_occur / kc0[j] else 0
       p_given_i <- if (kc0[i] > 0) co_occur / kc0[i] else 0
       phi_cc[i, j] <- min(p_given_i, p_given_j)
@@ -671,6 +593,82 @@ for (i in 1:n_countries) {
     }
   }
 }
+
+cat("Co-location country proximity matrix:", nrow(phi_cc), "x", ncol(phi_cc), "\n")
+cat("Mean proximity:", round(mean(phi_cc[upper.tri(phi_cc)]), 3), "\n")
+```
+
+## Method 2: Spearman correlation proximity
+
+An alternative approach uses **rank correlation** between indicator pairs across countries
+(for feature proximity) and between country pairs across indicators (for country proximity).
+Unlike co-location, which captures the degree to which high values co-occur, Spearman
+correlation captures the full monotonic relationship — whether countries that score high on
+one feature also tend to score high on another, *and* whether countries that score low on one
+also score low on the other.
+
+```{r spearman-feature-proximity, cache=TRUE}
+# Feature proximity: Spearman correlation between indicator columns
+spearman_pp <- cor(Mcp, method = "spearman")
+
+# Shift to [0, 1] for comparability with co-location proximity
+spearman_pp_01 <- (spearman_pp + 1) / 2
+
+cat("Spearman feature proximity matrix:", nrow(spearman_pp), "x", ncol(spearman_pp), "\n")
+cat("Mean raw Spearman correlation:", round(mean(spearman_pp[upper.tri(spearman_pp)]), 3), "\n")
+cat("Mean rescaled [0,1]:", round(mean(spearman_pp_01[upper.tri(spearman_pp_01)]), 3), "\n")
+```
+
+```{r spearman-country-proximity, cache=TRUE}
+# Country proximity: Spearman correlation between country rows
+spearman_cc <- cor(t(Mcp), method = "spearman")
+
+# Shift to [0, 1]
+spearman_cc_01 <- (spearman_cc + 1) / 2
+
+cat("Spearman country proximity matrix:", nrow(spearman_cc), "x", ncol(spearman_cc), "\n")
+cat("Mean raw Spearman correlation:", round(mean(spearman_cc[upper.tri(spearman_cc)]), 3), "\n")
+cat("Mean rescaled [0,1]:", round(mean(spearman_cc_01[upper.tri(spearman_cc_01)]), 3), "\n")
+```
+
+## PCA on the continuous matrix
+
+Rather than extracting a single complexity index from the eigenvalue method (which uses only
+the second eigenvector), we can use PCA on the full continuous matrix to capture multiple
+dimensions of institutional variation. The first few principal components may reveal distinct
+axes of institutional development — not just "more vs less" but qualitatively different
+patterns.
+
+```{r pca-analysis}
+# PCA on the country x feature matrix
+pca_result <- prcomp(Mcp, center = TRUE, scale. = TRUE)
+
+# Variance explained
+var_explained <- summary(pca_result)$importance[2, 1:10]
+cum_var <- summary(pca_result)$importance[3, 1:10]
+
+tibble(
+  PC = paste0("PC", 1:10),
+  `Variance explained` = round(var_explained * 100, 1),
+  `Cumulative %` = round(cum_var * 100, 1)
+) %>% kable(caption = "PCA variance explained (first 10 components)")
+```
+
+```{r pca-country-scores}
+# Country scores on first few PCs
+pca_country <- tibble(
+  country = rownames(Mcp),
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  PC3 = pca_result$x[, 3]
+) %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  )
+
+cat("Correlation between ECI (eigenvalue) and PC1:",
+    round(cor(eci_eigen, pca_result$x[, 1]), 3), "\n")
 ```
 
 ## Institution Space (Network)
@@ -710,20 +708,6 @@ diag(adj_cc) <- 0
 
 g_country <- graph_from_adjacency_matrix(adj_cc, mode = "undirected", weighted = TRUE)
 
-# Add region info
-region_lookup <- vdem_filtered %>%
-  select(country_name, e_regionpol_6C) %>%
-  deframe()
-
-region_labels <- c(
-  "1" = "Eastern Europe & Central Asia",
-  "2" = "Latin America & Caribbean",
-  "3" = "Middle East & North Africa",
-  "4" = "Sub-Saharan Africa",
-  "5" = "Western Europe & North America",
-  "6" = "East Asia & Pacific"
-)
-
 V(g_country)$region <- region_labels[as.character(
   region_lookup[V(g_country)$name]
 )]
@@ -744,10 +728,12 @@ preserves local structure well, making it ideal for revealing clusters of relate
 # doesn't support precomputed distance matrices well on all versions
 inst_dist <- as.dist(1 - phi_pp)
 
-# Use MDS first, then UMAP on the MDS coordinates for robust embedding
-set.seed(42)
+# Use MDS first, then UMAP on the MDS coordinates for robust embedding.
+# Larger n_neighbors and min_dist produce a more balanced, blob-shaped layout
+# than the stringy horseshoe that small values give on this near-1D proximity.
+set.seed(2024)
 mds_inst <- cmdscale(inst_dist, k = min(10, ncol(Mcp) - 1))
-umap_inst <- umap(mds_inst, n_neighbors = 15, min_dist = 0.1, n_epochs = 500)
+umap_inst <- umap(mds_inst, n_neighbors = 60, min_dist = 0.8, n_epochs = 500)
 
 umap_inst_df <- tibble(
   indicator = colnames(Mcp),
@@ -759,29 +745,26 @@ umap_inst_df <- tibble(
   left_join(indicator_info, by = c("indicator" = "code"))
 ```
 
-```{r umap-inst-plot, fig.width=12, fig.height=9}
-# Color palette for categories
+```{r umap-inst-plot, fig.width=6.5, fig.height=6.5}
+# Extend GL palette for 15+ categories
 n_cats <- length(unique(umap_inst_df$category))
-cat_colors <- colorRampPalette(brewer.pal(12, "Set3"))(n_cats)
+cat_colors <- colorRampPalette(gl_palettes$categorical)(n_cats)
+
+# Human-readable labels: truncate then wrap
+umap_inst_df <- umap_inst_df %>%
+  mutate(label = str_trunc(description, 35) %>% str_wrap(width = 20))
 
 ggplot(umap_inst_df, aes(x = UMAP1, y = UMAP2)) +
-  geom_point(aes(color = category, size = IFC), alpha = 0.75) +
+  geom_point(aes(color = category), size = 2.5, alpha = 0.75) +
   geom_text_repel(
-    aes(label = indicator),
-    size = 2.2, max.overlaps = 20, segment.alpha = 0.3
+    aes(label = label),
+    size = 1.8, max.overlaps = 20, segment.alpha = 0.3, lineheight = 0.85
   ) +
-  scale_size_continuous(range = c(2, 8), name = "Feature\nComplexity") +
   scale_color_manual(values = cat_colors, name = "Category") +
-  labs(
-    title = "Institution Space (UMAP Embedding)",
-    subtitle = "Institutional features positioned by co-occurrence similarity",
-    x = "UMAP 1", y = "UMAP 2"
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(
-    legend.position = "right",
-    plot.title = element_text(face = "bold", size = 16)
-  )
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/umap_institution_space_colocation.png", width = 9, height = 9, dpi = 300)
 ```
 
 ## Country Space (UMAP)
@@ -808,75 +791,1048 @@ umap_country_df <- umap_country_df %>%
   )
 ```
 
-```{r umap-country-plot, fig.width=12, fig.height=9}
-region_colors <- c(
-  "Western Europe & North America" = "#2166AC",
-  "Eastern Europe & Central Asia" = "#67A9CF",
-  "Latin America & Caribbean" = "#1B9E77",
-  "East Asia & Pacific" = "#D95F02",
-  "Middle East & North Africa" = "#E7298A",
-  "Sub-Saharan Africa" = "#E6AB02",
-  "Other" = "grey50"
-)
-
+```{r umap-country-plot, fig.width=6.5, fig.height=6.5}
 ggplot(umap_country_df, aes(x = UMAP1, y = UMAP2)) +
-  geom_point(aes(color = region, size = ICI), alpha = 0.75) +
+  geom_point(aes(color = region), size = 2.5, alpha = 0.75) +
   geom_text_repel(
     aes(label = country),
     size = 2.5, max.overlaps = 25, segment.alpha = 0.3
   ) +
-  scale_size_continuous(range = c(2, 7), name = "Institutional\nComplexity") +
-  scale_color_manual(values = region_colors, name = "Region") +
-  labs(
-    title = "Country Space (UMAP Embedding)",
-    subtitle = "Countries positioned by institutional portfolio similarity",
-    x = "UMAP 1", y = "UMAP 2"
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(
-    legend.position = "right",
-    plot.title = element_text(face = "bold", size = 16)
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/umap_country_space_colocation.png", width = 9, height = 9, dpi = 300)
+```
+
+## Spearman Institution Space (UMAP)
+
+```{r umap-institutions-spearman, cache=TRUE}
+inst_dist_sp <- as.dist(1 - spearman_pp_01)
+
+set.seed(42)
+mds_inst_sp <- cmdscale(inst_dist_sp, k = min(10, ncol(Mcp) - 1))
+umap_inst_sp <- umap(mds_inst_sp, n_neighbors = 15, min_dist = 0.1, n_epochs = 500)
+
+umap_inst_sp_df <- tibble(
+  indicator = colnames(Mcp),
+  UMAP1 = umap_inst_sp[, 1],
+  UMAP2 = umap_inst_sp[, 2],
+  ubiquity = kp0,
+  IFC = pci_eigen
+) %>%
+  left_join(indicator_info, by = c("indicator" = "code")) %>%
+  mutate(label = str_trunc(description, 35) %>% str_wrap(width = 20))
+```
+
+## Clustering the Spearman Institution Space
+
+The Spearman embedding is more compact and symmetric than the co-location one, so it is a
+better substrate for unsupervised cluster discovery. We run k-means directly on the 2D UMAP
+coordinates and use the elbow (within-cluster sum of squares) and silhouette width to pick
+the number of clusters.
+
+```{r kmeans-inst-spearman-diagnostics, cache=TRUE, fig.width=6.5, fig.height=3}
+library(cluster)
+
+coords_sp <- umap_inst_sp[, 1:2]
+
+ks <- 2:12
+cluster_diag <- map_dfr(ks, function(k) {
+  set.seed(1)
+  km <- kmeans(coords_sp, centers = k, nstart = 50, iter.max = 200)
+  sil <- silhouette(km$cluster, dist(coords_sp))
+  tibble(k = k, wss = km$tot.withinss, sil = mean(sil[, 3]))
+})
+
+p_wss <- ggplot(cluster_diag, aes(k, wss)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = ks) +
+  labs(x = "k", y = "Within-cluster SS")
+p_sil <- ggplot(cluster_diag, aes(k, sil)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = ks) +
+  labs(x = "k", y = "Mean silhouette width")
+
+p_wss + p_sil
+
+save_fig("full", "kmeans_diagnostics.pdf")
+```
+
+The silhouette width peaks at small k (best at k=3), while the WSS shows a soft elbow around
+k=3--4. We pick **k = 6** — it trades a modest drop in silhouette for a richer partition that
+separates conceptually distinct clusters (e.g., judicial rule-of-law features from
+deliberative/consultative features) that get lumped together at lower k.
+
+```{r kmeans-inst-spearman-fit}
+set.seed(1)
+N_CLUSTERS <- 6
+km_inst <- kmeans(coords_sp, centers = N_CLUSTERS, nstart = 50, iter.max = 200)
+
+# Map kmeans cluster IDs -> interpretive labels via landmark indicators.
+# (k-means IDs are arbitrary; using landmark codes makes label assignment
+# stable even if the ID ordering shifts.)
+landmark_labels <- tribble(
+  ~code,                  ~label,
+  "v2dlreason",           "Deliberation & Civic Voice",
+  "v2excrptps",           "Clean & Impartial State",
+  "v2juhcind",            "Rule of Law & Checks on Power",
+  "v2elmulpar",           "Inclusive Electoral Democracy",
+  "v2regoppgroupssize",   "Executive Control & Mobilization",
+  "v2mecenefi",           "Repression & Censorship"
+)
+
+cluster_id_to_label <- tibble(
+  indicator = colnames(Mcp),
+  cluster = km_inst$cluster
+) %>%
+  inner_join(landmark_labels, by = c("indicator" = "code")) %>%
+  distinct(cluster, label) %>%
+  arrange(cluster)
+
+stopifnot(nrow(cluster_id_to_label) == N_CLUSTERS)
+
+cluster_labels <- setNames(cluster_id_to_label$label,
+                           as.character(cluster_id_to_label$cluster))
+
+umap_inst_sp_df <- umap_inst_sp_df %>%
+  mutate(
+    cluster = km_inst$cluster,
+    cluster_label = factor(cluster_labels[as.character(cluster)],
+                           levels = landmark_labels$label)
   )
+
+# Summary table: one row per cluster, showing size and top categories
+cluster_summary <- umap_inst_sp_df %>%
+  group_by(cluster, cluster_label) %>%
+  summarise(
+    n = n(),
+    top_categories = paste(
+      head(names(sort(table(category), decreasing = TRUE)), 3),
+      collapse = ", "
+    ),
+    .groups = "drop"
+  ) %>%
+  arrange(cluster)
+
+kable(cluster_summary,
+      col.names = c("Cluster", "Label", "n", "Top V-Dem categories"),
+      caption = "K-means clusters (k = 6) on the Spearman institution UMAP")
+```
+
+### Cluster membership
+
+For each cluster we list every institutional feature it contains:
+
+```{r kmeans-inst-spearman-members, results='asis'}
+for (cl in sort(unique(umap_inst_sp_df$cluster))) {
+  members <- umap_inst_sp_df %>% filter(cluster == cl)
+  cat("\n\n**Cluster", cl, "—", cluster_labels[as.character(cl)],
+      "** (n = ", nrow(members), ")\n\n", sep = "")
+  members %>%
+    arrange(category, description) %>%
+    select(Code = indicator, Category = category, Description = description) %>%
+    kable() %>%
+    print()
+}
+```
+
+### Cluster-colored Institution Space
+
+Replacing the V-Dem category coloring with the discovered clusters. A bold label marks
+each cluster's centroid.
+
+```{r umap-inst-spearman-cluster-plot, fig.width=6.5, fig.height=6.5}
+# Cluster centroids for label placement
+cluster_centroids <- umap_inst_sp_df %>%
+  group_by(cluster_label) %>%
+  summarise(
+    UMAP1 = median(UMAP1),
+    UMAP2 = median(UMAP2),
+    .groups = "drop"
+  )
+
+cluster_colors <- colorRampPalette(gl_palettes$categorical)(N_CLUSTERS)
+names(cluster_colors) <- levels(umap_inst_sp_df$cluster_label)
+
+ggplot(umap_inst_sp_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = cluster_label), size = 2.5, alpha = 0.75,
+             show.legend = FALSE) +
+  geom_text_repel(
+    aes(label = label, color = cluster_label),
+    size = 1.8, max.overlaps = 20, segment.alpha = 0.3, lineheight = 0.85,
+    show.legend = FALSE
+  ) +
+  geom_label(
+    data = cluster_centroids,
+    aes(label = cluster_label, fill = cluster_label),
+    size = 3.2, fontface = "bold", color = "white",
+    label.padding = unit(0.35, "lines"), label.r = unit(0.25, "lines"),
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = cluster_colors) +
+  scale_fill_manual(values = cluster_colors) +
+  labs(x = "UMAP 1", y = "UMAP 2")
+
+ggsave("imgs/umap_institution_space_spearman_clusters.png",
+       width = 9, height = 9, dpi = 300)
+```
+
+## Spearman Country Space (UMAP)
+
+```{r umap-countries-spearman, cache=TRUE}
+set.seed(42)
+country_dist_sp <- as.dist(1 - spearman_cc_01)
+mds_country_sp <- cmdscale(country_dist_sp, k = min(10, nrow(Mcp) - 1))
+umap_country_sp <- umap(mds_country_sp, n_neighbors = 15, min_dist = 0.2, n_epochs = 500)
+
+umap_country_sp_df <- tibble(
+  country = rownames(Mcp),
+  UMAP1 = umap_country_sp[, 1],
+  UMAP2 = umap_country_sp[, 2],
+  ICI = eci_eigen,
+  diversity = kc0
+) %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  )
+```
+
+```{r umap-country-spearman-plot, fig.width=6.5, fig.height=6.5}
+ggplot(umap_country_sp_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = region), size = 2.5, alpha = 0.75) +
+  geom_text_repel(
+    aes(label = country),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3
+  ) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/umap_country_space_spearman.png", width = 9, height = 9, dpi = 300)
+```
+
+## Clustering the Spearman Country Space
+
+We repeat the same k-means exercise on the country UMAP. Because k-means clusters are just
+groups of points in embedding space, we can then look *back* at the raw Mcp matrix and ask:
+for each cluster of countries, which institutional features do they share — and which are
+they collectively deficient on?
+
+```{r kmeans-country-spearman-diagnostics, cache=TRUE, fig.width=6.5, fig.height=3}
+coords_country_sp <- umap_country_sp[, 1:2]
+
+country_cluster_diag <- map_dfr(2:12, function(k) {
+  set.seed(1)
+  km <- kmeans(coords_country_sp, centers = k, nstart = 50, iter.max = 200)
+  sil <- silhouette(km$cluster, dist(coords_country_sp))
+  tibble(k = k, wss = km$tot.withinss, sil = mean(sil[, 3]))
+})
+
+p_wss_c <- ggplot(country_cluster_diag, aes(k, wss)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:12) +
+  labs(x = "k", y = "Within-cluster SS")
+p_sil_c <- ggplot(country_cluster_diag, aes(k, sil)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:12) +
+  labs(x = "k", y = "Mean silhouette width")
+
+p_wss_c + p_sil_c
+
+save_fig("full", "kmeans_country_diagnostics.pdf")
+```
+
+The silhouette is highest at k=2 (a coarse democracy/autocracy split), with a secondary
+plateau around k=6--7. We pick **k = 6** — it surfaces a richer taxonomy (closed autocracies,
+conflict states, consolidating democracies, etc.) while still being interpretable.
+
+```{r kmeans-country-spearman-fit}
+set.seed(1)
+N_CLUSTERS_C <- 6
+km_country <- kmeans(coords_country_sp, centers = N_CLUSTERS_C,
+                     nstart = 50, iter.max = 200)
+
+# Landmark-country labelling: each landmark uniquely names a cluster.
+country_landmark_labels <- tribble(
+  ~country,      ~label,
+  "Sweden",      "Advanced Liberal Democracies",
+  "Poland",      "Consolidating Democracies",
+  "Brazil",      "Contentious Electoral Democracies",
+  "China",       "Closed Autocracies",
+  "Haiti",       "Conflict & Breakdown States",
+  "Mauritius",   "Small Open Democracies"
+)
+
+country_cluster_map <- tibble(
+  country = rownames(Mcp),
+  cluster = km_country$cluster
+) %>%
+  inner_join(country_landmark_labels, by = "country") %>%
+  distinct(cluster, label) %>%
+  arrange(cluster)
+
+stopifnot(nrow(country_cluster_map) == N_CLUSTERS_C)
+
+country_cluster_labels <- setNames(country_cluster_map$label,
+                                   as.character(country_cluster_map$cluster))
+
+umap_country_sp_df <- umap_country_sp_df %>%
+  mutate(
+    cluster = km_country$cluster,
+    cluster_label = factor(
+      country_cluster_labels[as.character(cluster)],
+      levels = country_landmark_labels$label
+    )
+  )
+
+# Summary: cluster size + representative members
+country_cluster_summary <- umap_country_sp_df %>%
+  group_by(cluster, cluster_label) %>%
+  summarise(
+    n = n(),
+    representative = paste(head(country, 6), collapse = ", "),
+    .groups = "drop"
+  ) %>%
+  arrange(cluster)
+
+kable(country_cluster_summary,
+      col.names = c("Cluster", "Label", "n", "First 6 members"),
+      caption = "K-means clusters (k = 6) on the Spearman country UMAP")
+```
+
+### What each country cluster has (and lacks) in common
+
+For every cluster we compute each institutional feature's mean across its members and compare
+to the global mean (z-score vs. the global SD). The top positive z's are the cluster's shared
+**distinctive strengths**; the top negatives are shared **distinctive weaknesses**.
+
+```{r kmeans-country-cluster-features, results='asis'}
+country_global_means <- colMeans(Mcp)
+country_global_sds <- apply(Mcp, 2, sd)
+
+indicator_desc <- setNames(indicator_info$description, indicator_info$code)
+
+for (cl in sort(unique(umap_country_sp_df$cluster))) {
+  cl_label <- country_cluster_labels[as.character(cl)]
+  cl_members <- umap_country_sp_df %>% filter(cluster == cl) %>% pull(country)
+
+  cat("\n\n**Cluster", cl, "—", cl_label,
+      "** (n = ", length(cl_members), ")\n\n", sep = "")
+
+  cl_means <- colMeans(Mcp[cl_members, , drop = FALSE])
+  z <- (cl_means - country_global_means) / country_global_sds
+
+  top_high <- sort(z, decreasing = TRUE) %>% head(8)
+  top_low  <- sort(z, decreasing = FALSE) %>% head(8)
+
+  cat("_Members:_ ", paste(cl_members, collapse = ", "), "\n\n", sep = "")
+
+  high_tbl <- tibble(
+    Feature = indicator_desc[names(top_high)],
+    Code = names(top_high),
+    `z vs global` = round(unname(top_high), 2)
+  )
+  low_tbl <- tibble(
+    Feature = indicator_desc[names(top_low)],
+    Code = names(top_low),
+    `z vs global` = round(unname(top_low), 2)
+  )
+
+  cat("\n_Shared strengths:_\n\n")
+  print(kable(high_tbl))
+  cat("\n_Shared weaknesses:_\n\n")
+  print(kable(low_tbl))
+}
+```
+
+### Cluster-colored Country Space
+
+```{r umap-country-spearman-cluster-plot, fig.width=6.5, fig.height=6.5}
+country_centroids <- umap_country_sp_df %>%
+  group_by(cluster_label) %>%
+  summarise(UMAP1 = median(UMAP1), UMAP2 = median(UMAP2), .groups = "drop")
+
+country_cluster_colors <- colorRampPalette(gl_palettes$categorical)(N_CLUSTERS_C)
+names(country_cluster_colors) <- levels(umap_country_sp_df$cluster_label)
+
+ggplot(umap_country_sp_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = cluster_label), size = 2.5, alpha = 0.75,
+             show.legend = FALSE) +
+  geom_text_repel(
+    aes(label = country, color = cluster_label),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3,
+    show.legend = FALSE
+  ) +
+  geom_label(
+    data = country_centroids,
+    aes(label = cluster_label, fill = cluster_label),
+    size = 3.2, fontface = "bold", color = "white",
+    label.padding = unit(0.35, "lines"), label.r = unit(0.25, "lines"),
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = country_cluster_colors) +
+  scale_fill_manual(values = country_cluster_colors) +
+  labs(x = "UMAP 1", y = "UMAP 2")
+
+ggsave("imgs/umap_country_space_spearman_clusters.png",
+       width = 9, height = 9, dpi = 300)
+```
+
+### Economic Complexity Overlay
+
+Do the institutional clusters line up with economic complexity? We recolor the same
+country UMAP by each country's latest Atlas SITC **ECI**, keeping the cluster labels
+in place. Clusters that line up with a single color band share an ECI regime;
+clusters that span the gradient contain institutional archetypes spread across the
+complexity distribution.
+
+```{r umap-country-eci-plot, fig.width=6.5, fig.height=6.5}
+iso3_lookup <- vdem_filtered %>%
+  select(country_name, country_text_id) %>%
+  deframe()
+
+eci_latest <- arrow::read_parquet(
+  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", "atl_sitc_eci")
+) %>%
+  filter(!is.na(atl_sitc_eci)) %>%
+  group_by(countrycodeiso) %>%
+  slice_max(year, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(iso3 = countrycodeiso, eci = atl_sitc_eci, eci_year = year)
+
+umap_eci_df <- umap_country_sp_df %>%
+  mutate(iso3 = unname(iso3_lookup[country])) %>%
+  left_join(eci_latest, by = "iso3")
+
+cat("Countries without matching ECI:",
+    sum(is.na(umap_eci_df$eci)), "of", nrow(umap_eci_df), "\n")
+
+ggplot(umap_eci_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = eci), size = 2.8, alpha = 0.9) +
+  geom_text_repel(
+    aes(label = country),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3
+  ) +
+  geom_label(
+    data = country_centroids,
+    aes(label = cluster_label, fill = cluster_label),
+    size = 3.2, fontface = "bold", color = "white",
+    label.padding = unit(0.35, "lines"), label.r = unit(0.25, "lines"),
+    show.legend = FALSE
+  ) +
+  scale_color_gradient2(
+    low = highlight, mid = "grey85", high = gl$brand_blue,
+    midpoint = 0, name = "ECI", na.value = "grey75"
+  ) +
+  scale_fill_manual(values = country_cluster_colors) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/umap_country_space_spearman_eci.png",
+       width = 9, height = 9, dpi = 300)
+```
+
+## Alternative Clustering: Original Features vs. PCA vs. UMAP
+
+The clusters above were fit on the 2D UMAP coordinates — i.e., k-means is partitioning the
+points you actually see in the chart. UMAP preserves local neighborhood structure but distorts
+global gaps, and the embedding inherits stochasticity from its own hyperparameters. To check
+how much that choice is driving the results, we re-fit k-means with the same K under two
+alternatives:
+
+- **Original features**: k-means directly on the rows of `Mcp` (countries) or its transpose
+  (institutions). Distances are Euclidean in the full institutional-feature space.
+- **PCA scores**: k-means on the leading principal components covering 80% of variance.
+  This denoises the high-dim space without forcing it into 2D.
+
+We compare the three partitions using the **Adjusted Rand Index** (ARI): 1 = identical
+clusters (up to relabelling), 0 = chance agreement, negative = worse than chance.
+
+```{r alt-clustering-fit}
+adjustedRandIndex <- function(a, b) {
+  tab <- table(a, b)
+  n  <- sum(tab)
+  ni <- rowSums(tab); nj <- colSums(tab)
+  choose2 <- function(x) x * (x - 1) / 2
+  sum_ij <- sum(choose2(tab))
+  sum_i  <- sum(choose2(ni)); sum_j <- sum(choose2(nj))
+  total  <- choose2(n)
+  expected <- sum_i * sum_j / total
+  max_idx  <- (sum_i + sum_j) / 2
+  if (max_idx == expected) return(0)
+  (sum_ij - expected) / (max_idx - expected)
+}
+
+# Country space: PCA scores already exist (pca_result on Mcp)
+var_cum_c <- summary(pca_result)$importance[3, ]
+n_pc_country <- which(var_cum_c >= 0.80)[1]
+country_pcs <- pca_result$x[, 1:n_pc_country]
+
+# Institution space: PCA on the transposed matrix (indicators as rows)
+pca_inst <- prcomp(t(Mcp), center = TRUE, scale. = TRUE)
+var_cum_i <- summary(pca_inst)$importance[3, ]
+n_pc_inst <- which(var_cum_i >= 0.80)[1]
+inst_pcs <- pca_inst$x[, 1:n_pc_inst]
+
+set.seed(1)
+km_country_orig <- kmeans(Mcp, centers = N_CLUSTERS_C,
+                          nstart = 50, iter.max = 200)
+set.seed(1)
+km_country_pca  <- kmeans(country_pcs, centers = N_CLUSTERS_C,
+                          nstart = 50, iter.max = 200)
+set.seed(1)
+km_inst_orig    <- kmeans(t(Mcp), centers = N_CLUSTERS,
+                          nstart = 50, iter.max = 200)
+set.seed(1)
+km_inst_pca     <- kmeans(inst_pcs, centers = N_CLUSTERS,
+                          nstart = 50, iter.max = 200)
+
+ari_country <- tibble(
+  Comparison = c("UMAP vs Original features",
+                 "UMAP vs PCA scores",
+                 "Original vs PCA"),
+  ARI = c(
+    adjustedRandIndex(km_country$cluster, km_country_orig$cluster),
+    adjustedRandIndex(km_country$cluster, km_country_pca$cluster),
+    adjustedRandIndex(km_country_orig$cluster, km_country_pca$cluster)
+  )
+)
+
+ari_inst <- tibble(
+  Comparison = c("UMAP vs Original features",
+                 "UMAP vs PCA scores",
+                 "Original vs PCA"),
+  ARI = c(
+    adjustedRandIndex(km_inst$cluster, km_inst_orig$cluster),
+    adjustedRandIndex(km_inst$cluster, km_inst_pca$cluster),
+    adjustedRandIndex(km_inst_orig$cluster, km_inst_pca$cluster)
+  )
+)
+
+kable(ari_country, digits = 3,
+      caption = sprintf("Country clusters: agreement across methods (PCA uses %d components, 80%% variance)",
+                        n_pc_country))
+kable(ari_inst, digits = 3,
+      caption = sprintf("Institution clusters: agreement across methods (PCA uses %d components, 80%% variance)",
+                        n_pc_inst))
+```
+
+To diagnose how *crisp* each partition actually is, we compute the mean silhouette width
+**in the same feature space the clustering was done on** (so the UMAP-based clusters are
+scored against UMAP coordinates, the raw-feature clusters against `Mcp`, etc.). Higher is
+better; near zero means cluster boundaries are weak.
+
+```{r alt-clustering-silhouette}
+sil_mean <- function(km, X) mean(silhouette(km$cluster, dist(X))[, 3])
+
+silhouette_tbl <- tribble(
+  ~Space,        ~Method,             ~`Mean silhouette`,
+  "Country",     "UMAP coordinates",  sil_mean(km_country, coords_country_sp),
+  "Country",     "Original features", sil_mean(km_country_orig, Mcp),
+  "Country",     "PCA scores",        sil_mean(km_country_pca, country_pcs),
+  "Institution", "UMAP coordinates",  sil_mean(km_inst, coords_sp),
+  "Institution", "Original features", sil_mean(km_inst_orig, t(Mcp)),
+  "Institution", "PCA scores",        sil_mean(km_inst_pca, inst_pcs)
+)
+kable(silhouette_tbl, digits = 3,
+      caption = "Mean silhouette width per clustering, scored in its own feature space")
+```
+
+Two findings come out of this:
+
+1. **The UMAP-based clusters score artificially high (~0.40) because UMAP has already
+   pre-separated points in 2D**, so any k-means partition over those coordinates falls into
+   pre-existing visual gaps. The raw-feature and PCA clusterings, scored honestly in their
+   high-dim native spaces, sit around 0.10–0.16 for both countries and institutions.
+
+2. **The institution data does not have a strong K=6 structure in native space.** Sweeping
+   k from 2 to 12 with k-means on `t(Mcp)`, the silhouette peaks at k=2 (0.20–0.25) and
+   drops as k grows. Hierarchical clustering on Spearman-correlation distance shows the same
+   pattern. So the institutional space is genuinely closer to a 2-axis (democratic vs.
+   authoritarian feature bundles) structure with weaker substructure beneath it — UMAP +
+   k-means makes the K=6 partition look cleaner than the underlying data supports.
+
+So the UMAP-based clusters remain the most useful *for visualization and storytelling*
+(they map cleanly onto the chart), but the alt clusterings are the more honest description
+of what the high-dim space actually contains. The country side is more robust across all
+three methods (regime typologies do recur); the institution side is dominated by one
+strong democratic-vs-authoritarian axis with the K=6 carving being a stylistic choice on
+top of that.
+
+```{r alt-clustering-plots, fig.width=6.5, fig.height=6.5}
+# Cluster labels were generated by inspecting each cluster's members
+# (ranked by Euclidean distance to the centroid in the clustering's own
+# feature space) and naming the dominant institutional / regime character.
+# See scratch/dump_alt_clusters.R for the full member-distance dump.
+country_orig_labels <- tribble(
+  ~cluster, ~label,
+  1, "Emerging Democracies",
+  2, "Closed Autocracies",
+  3, "Conflict-Affected Fragile States",
+  4, "Hybrid Electoral Autocracies",
+  5, "Liberal Democracies",
+  6, "Repressive Authoritarian Regimes"
+)
+country_pca_labels <- tribble(
+  ~cluster, ~label,
+  1, "Hybrid Electoral Autocracies",
+  2, "Liberal Democracies",
+  3, "Low-Capacity Electoral Democracies",
+  4, "Collapsed States & Civil Wars",
+  5, "Closed Authoritarian Regimes",
+  6, "Backsliding Middle Democracies"
+)
+inst_orig_labels <- tribble(
+  ~cluster, ~label,
+  1, "Contentious Politics & Mobilization",
+  2, "Inclusive Programmatic Parties",
+  3, "Executive Discretionary Powers",
+  4, "Rule of Law & Anti-Corruption",
+  5, "Civil Liberties & Media Freedom",
+  6, "Personal Freedoms & Sovereignty"
+)
+inst_pca_labels <- tribble(
+  ~cluster, ~label,
+  1, "Personal Freedoms & State Sovereignty",
+  2, "Social Inclusion & Party Organization",
+  3, "Executive Discretion & Digital Repression",
+  4, "Mass Mobilization & Polarization",
+  5, "Bureaucratic Integrity & Accountability",
+  6, "Civil Liberties & Media Pluralism"
+)
+
+plot_alt <- function(df, key_col, cluster_vec, label_tbl, title) {
+  wrapped <- str_wrap(label_tbl$label, width = 18)
+  id_to_label <- setNames(wrapped, as.character(label_tbl$cluster))
+  df$alt_id <- cluster_vec[df[[key_col]]]
+  df$alt <- factor(id_to_label[as.character(df$alt_id)], levels = wrapped)
+
+  centroids <- df %>%
+    group_by(alt) %>%
+    summarise(UMAP1 = median(UMAP1), UMAP2 = median(UMAP2), .groups = "drop")
+
+  n_clust <- length(levels(df$alt))
+  pal <- colorRampPalette(gl_palettes$categorical)(n_clust)
+
+  ggplot(df, aes(x = UMAP1, y = UMAP2)) +
+    geom_point(aes(color = alt), size = 2, alpha = 0.7, show.legend = FALSE) +
+    geom_label_repel(
+      data = centroids,
+      aes(label = alt, fill = alt),
+      size = 2.6, fontface = "bold", color = "white",
+      label.padding = unit(0.25, "lines"), label.r = unit(0.2, "lines"),
+      box.padding = unit(0.4, "lines"), point.padding = unit(0.2, "lines"),
+      min.segment.length = 0, segment.color = "grey40",
+      seed = 1, max.overlaps = Inf,
+      show.legend = FALSE
+    ) +
+    scale_color_manual(values = pal) +
+    scale_fill_manual(values = pal) +
+    labs(x = "UMAP 1", y = "UMAP 2", title = title)
+}
+
+p_country_orig <- plot_alt(umap_country_sp_df, "country",
+                           setNames(km_country_orig$cluster, rownames(Mcp)),
+                           country_orig_labels,
+                           "Country clusters from Original features")
+p_country_pca  <- plot_alt(umap_country_sp_df, "country",
+                           setNames(km_country_pca$cluster, rownames(Mcp)),
+                           country_pca_labels,
+                           "Country clusters from PCA scores")
+p_inst_orig <- plot_alt(umap_inst_sp_df, "indicator",
+                        setNames(km_inst_orig$cluster, colnames(Mcp)),
+                        inst_orig_labels,
+                        "Institution clusters from Original features")
+p_inst_pca  <- plot_alt(umap_inst_sp_df, "indicator",
+                        setNames(km_inst_pca$cluster, colnames(Mcp)),
+                        inst_pca_labels,
+                        "Institution clusters from PCA scores")
+
+(p_country_orig + p_country_pca) / (p_inst_orig + p_inst_pca)
+
+ggsave("imgs/alt_clustering_comparison.png",
+       width = 9, height = 9, dpi = 200)
+```
+
+Each panel re-uses the Spearman UMAP layout (so positions are unchanged) but recolors points
+by the alternative cluster assignments. Where contiguous regions of the embedding share a
+single color, the alt-method recovers the same group as UMAP-k-means; where colors fragment
+across the embedding, the alt-method is partitioning along axes that UMAP collapsed (or
+vice versa).
+
+# Country Profiles
+
+## Institutional Portfolios in Spearman Space
+
+How do individual countries occupy the institution space? Each panel shows every
+institutional feature, with point size and color intensity proportional to the country's
+continuous score (0 = absent/weak, 1 = strongest observed). The Spearman embedding is
+used here because it respects both shared strengths *and* shared weaknesses — two countries
+that both score unusually low on a feature are brought closer together.
+
+```{r country-profiles-institution-space, fig.width=6.5, fig.height=9}
+focus_countries <- c("Cambodia", "Pakistan", "Venezuela",
+                     "Morocco", "Bolivia", "Argentina")
+
+# Summary table
+eci_df %>%
+  filter(country %in% focus_countries) %>%
+  select(country, ICI, diversity) %>%
+  arrange(desc(ICI)) %>%
+  kable(col.names = c("Country", "ICI", "Total intensity"),
+        digits = 2)
+
+# Build a long data frame using Spearman institution UMAP
+profile_df <- map_dfr(focus_countries, function(cname) {
+  umap_inst_sp_df %>%
+    mutate(
+      country = cname,
+      score = Mcp[cname, indicator]
+    )
+})
+
+ggplot(profile_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(color = gl$text_muted, size = 0.5, alpha = 0.3) +
+  geom_point(aes(size = score, color = score)) +
+  scale_size_continuous(range = c(0.5, 2.5), guide = "none") +
+  scale_color_gradient2(low = highlight, mid = "grey85", high = gl$brand_blue,
+                        midpoint = 0.5, limits = c(0, 1), name = "Score") +
+  facet_wrap(~country, ncol = 2) +
+  labs(x = "UMAP 1", y = "UMAP 2")
+
+save_fig("full_tall", "country_profiles_institution_space.pdf")
+```
+
+## Nearest Institutional Peers
+
+For each focus country, we identify its closest neighbors based on Spearman correlation
+of institutional profiles. Two countries are "institutional peers" when their scores move
+together across all features — including shared *weaknesses* (both scoring unusually low)
+which are just as informative as shared strengths.
+
+```{r nearest-peers, results='asis'}
+n_peers <- 5
+
+for (cname in focus_countries) {
+  # Get Spearman similarities to all other countries
+  sims <- spearman_cc[cname, ]
+  sims <- sort(sims[names(sims) != cname], decreasing = TRUE)
+  peers <- names(sims)[1:n_peers]
+  peer_cors <- sims[1:n_peers]
+
+  cat("\n\n###", cname, "\n\n")
+
+  # Peer table with both proximity measures
+  coloc_sims <- phi_cc[cname, peers]
+
+  tibble(
+    Peer = peers,
+    `Spearman r` = round(peer_cors, 3),
+    `Co-location proximity` = round(coloc_sims, 3)
+  ) %>% kable() %>% print()
+
+  # What makes them peers? Find features where the country and its top peer
+  # are BOTH distinctively far from the global mean in the same direction
+  top_peer <- peers[1]
+  country_scores <- Mcp[cname, ]
+  peer_scores <- Mcp[top_peer, ]
+  global_means <- colMeans(Mcp)
+  global_sds <- apply(Mcp, 2, sd)
+
+  # Z-scores relative to global distribution
+  country_z <- (country_scores - global_means) / global_sds
+  peer_z <- (peer_scores - global_means) / global_sds
+
+  # Shared distinctive features: both far from mean in same direction
+  shared_distinctive <- tibble(
+    indicator = names(country_scores),
+    country_score = country_scores,
+    peer_score = peer_scores,
+    country_z = country_z,
+    peer_z = peer_z,
+    same_direction = sign(country_z) == sign(peer_z),
+    combined_extremity = abs(country_z) + abs(peer_z)
+  ) %>%
+    filter(same_direction, abs(country_z) > 0.5, abs(peer_z) > 0.5) %>%
+    left_join(indicator_info, by = c("indicator" = "code")) %>%
+    arrange(desc(combined_extremity))
+
+  # Show top shared distinctive features split by direction
+  shared_high <- shared_distinctive %>% filter(country_z > 0) %>% head(5)
+  shared_low <- shared_distinctive %>% filter(country_z < 0) %>% head(5)
+
+  if (nrow(shared_high) > 0) {
+    cat("\n\n**Shared strengths with", top_peer, "(both score well above global mean):**\n\n")
+    shared_high %>%
+      select(description, category,
+             !!sym(cname) := country_score,
+             !!sym(top_peer) := peer_score) %>%
+      mutate(across(where(is.numeric), ~round(.x, 2))) %>%
+      kable() %>% print()
+  }
+
+  if (nrow(shared_low) > 0) {
+    cat("\n\n**Shared weaknesses with", top_peer, "(both score well below global mean):**\n\n")
+    shared_low %>%
+      select(description, category,
+             !!sym(cname) := country_score,
+             !!sym(top_peer) := peer_score) %>%
+      mutate(across(where(is.numeric), ~round(.x, 2))) %>%
+      kable() %>% print()
+  }
+}
+```
+
+## What Makes Each Country Distinct?
+
+For each focus country, we show its most extreme features — the indicators where it scores
+furthest from the global mean. These are the features that most define the country's
+institutional character, whether strengths or weaknesses.
+
+```{r country-distinct-features, fig.width=6.5, fig.height=9, results='asis'}
+global_means <- colMeans(Mcp)
+global_sds <- apply(Mcp, 2, sd)
+
+for (cname in focus_countries) {
+  scores <- Mcp[cname, ]
+  z_scores <- (scores - global_means) / global_sds
+
+  extremes <- tibble(
+    indicator = names(scores),
+    score = scores,
+    z = z_scores
+  ) %>%
+    left_join(indicator_info, by = c("indicator" = "code")) %>%
+    arrange(z)
+
+  # Top 10 highest and lowest
+  top10 <- bind_rows(
+    extremes %>% head(10) %>% mutate(end = "Lowest"),
+    extremes %>% tail(10) %>% mutate(end = "Highest")
+  ) %>%
+    mutate(
+      label = str_trunc(description, 45),
+      label = fct_reorder(label, z)
+    )
+
+  p <- ggplot(top10, aes(x = z, y = label, fill = end)) +
+    geom_col(show.legend = FALSE) +
+    geom_vline(xintercept = 0, color = gl$text_dark, linewidth = 0.3) +
+    scale_fill_manual(values = c("Lowest" = highlight, "Highest" = gl$brand_blue)) +
+    labs(x = "Standard deviations from global mean", y = NULL)
+
+  cat("\n\n### ", cname, "\n\n", sep = "")
+  print(p)
+}
+```
+
+## Cluster Placement & Anchoring Features
+
+Each focus country sits in one of the six country clusters identified earlier. This section
+unpacks *why*. For every country we compute:
+
+1. The **Spearman correlation** of its full institutional profile with each cluster's mean
+   vector — how closely its overall pattern matches each institutional archetype.
+2. The features **anchoring** it to its cluster (where the country's score is close to its
+   own cluster mean *and* far from the runner-up cluster mean), weighted by how much the
+   two cluster means actually differ on that feature.
+3. The features **pulling** it toward the runner-up cluster — outlier dimensions where the
+   country looks more like the alternative archetype.
+
+```{r country-cluster-anchors, results='asis'}
+# Pre-compute per-cluster mean vectors (labelled by cluster name)
+country_cluster_members <- split(rownames(Mcp), km_country$cluster)
+cluster_mean_matrix <- sapply(country_cluster_members, function(cs)
+  colMeans(Mcp[cs, , drop = FALSE]))
+colnames(cluster_mean_matrix) <- country_cluster_labels[colnames(cluster_mean_matrix)]
+
+indicator_desc_lookup <- setNames(indicator_info$description, indicator_info$code)
+
+for (cname in focus_countries) {
+  cl <- km_country$cluster[rownames(Mcp) == cname]
+  cl_label <- country_cluster_labels[as.character(cl)]
+
+  cv <- Mcp[cname, ]
+  sims <- apply(cluster_mean_matrix, 2,
+                function(v) cor(cv, v, method = "spearman"))
+
+  sims_df <- tibble(Cluster = names(sims),
+                    `Spearman r` = round(sims, 3)) %>%
+    arrange(desc(`Spearman r`))
+
+  alt_label <- sims_df$Cluster[2]
+  own_mu <- cluster_mean_matrix[, cl_label]
+  alt_mu <- cluster_mean_matrix[, alt_label]
+
+  # anchor score = (closer to own than alt) × (how different own/alt are on this feature)
+  pull  <- abs(cv - alt_mu) - abs(cv - own_mu)
+  gap   <- abs(own_mu - alt_mu)
+  score <- pull * gap
+
+  feat_tbl <- tibble(
+    Feature = str_trunc(indicator_desc_lookup[names(cv)], 45),
+    country_val = round(unname(cv), 2),
+    own_val = round(unname(own_mu), 2),
+    alt_val = round(unname(alt_mu), 2),
+    score = round(score, 4)
+  ) %>% arrange(desc(score))
+
+  cat("\n\n### ", cname, " — placed in *", cl_label, "*\n\n", sep = "")
+
+  # Correlation table
+  print(kable(sims_df,
+              caption = paste("Profile correlation of", cname,
+                              "with each cluster mean")))
+
+  # Top anchoring features
+  cat("\n*Features anchoring ", cname, " to ", cl_label,
+      " (vs. runner-up ", alt_label, "):*\n\n", sep = "")
+  print(kable(feat_tbl %>% head(8) %>% select(-score),
+              col.names = c("Feature", cname, cl_label, alt_label)))
+
+  # Top features pulling toward the alternative
+  cat("\n*Features where ", cname, " instead resembles ", alt_label, ":*\n\n",
+      sep = "")
+  print(kable(feat_tbl %>% tail(5) %>% arrange(score) %>% select(-score),
+              col.names = c("Feature", cname, cl_label, alt_label)))
+}
+```
+
+# Comparing Proximity Methods
+
+How similar are the co-location and Spearman proximity matrices? If they agree strongly,
+the institutional space structure is robust to the choice of proximity measure. If they
+diverge, they're capturing different aspects of institutional relationships.
+
+## Element-wise comparison
+
+```{r proximity-comparison}
+# Feature proximity comparison
+coloc_upper <- phi_pp[upper.tri(phi_pp)]
+spear_upper <- spearman_pp_01[upper.tri(spearman_pp_01)]
+
+cor_feature_prox <- cor(coloc_upper, spear_upper, method = "spearman")
+
+cat("Feature proximity matrices:\n")
+cat("  Spearman rank correlation:", round(cor_feature_prox, 3), "\n")
+
+# Country proximity comparison
+coloc_cc_upper <- phi_cc[upper.tri(phi_cc)]
+spear_cc_upper <- spearman_cc_01[upper.tri(spearman_cc_01)]
+
+cor_country_prox <- cor(coloc_cc_upper, spear_cc_upper, method = "spearman")
+
+cat("\nCountry proximity matrices:\n")
+cat("  Spearman rank correlation:", round(cor_country_prox, 3), "\n")
+```
+
+```{r proximity-scatter, fig.height=4.5}
+# Scatter: co-location vs Spearman proximity (features)
+prox_compare_df <- tibble(
+  colocation = coloc_upper,
+  spearman = spear_upper
+)
+
+p1 <- ggplot(prox_compare_df, aes(x = colocation, y = spearman)) +
+  geom_point(alpha = 0.1, size = 0.5) +
+  geom_smooth(method = "lm", color = highlight, se = FALSE) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = gl$text_muted) +
+  labs(x = "Co-location proximity", y = "Spearman proximity (rescaled)")
+
+# Scatter: co-location vs Spearman proximity (countries)
+prox_compare_cc_df <- tibble(
+  colocation = coloc_cc_upper,
+  spearman = spear_cc_upper
+)
+
+p2 <- ggplot(prox_compare_cc_df, aes(x = colocation, y = spearman)) +
+  geom_point(alpha = 0.1, size = 0.5) +
+  geom_smooth(method = "lm", color = highlight, se = FALSE) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = gl$text_muted) +
+  labs(x = "Co-location proximity", y = "Spearman proximity (rescaled)")
+
+p1 + p2 + plot_annotation(tag_levels = "A")
+
+save_fig("full", "proximity_comparison_scatter.pdf")
+```
+
+## Comparing embeddings
+
+Do the two proximity methods produce similar institution spaces? We compare by computing
+the Spearman correlation between pairwise distances in each UMAP embedding.
+
+```{r embedding-comparison}
+# Pairwise Euclidean distances in each institution UMAP
+dist_coloc <- as.matrix(dist(umap_inst[, 1:2]))
+dist_spear <- as.matrix(dist(umap_inst_sp[, 1:2]))
+
+# Correlation between pairwise distances (Mantel-like test)
+d_coloc_upper <- dist_coloc[upper.tri(dist_coloc)]
+d_spear_upper <- dist_spear[upper.tri(dist_spear)]
+
+cat("Institution UMAP distance correlation (Spearman):",
+    round(cor(d_coloc_upper, d_spear_upper, method = "spearman"), 3), "\n")
+
+# Same for country UMAP
+dist_coloc_c <- as.matrix(dist(umap_country[, 1:2]))
+dist_spear_c <- as.matrix(dist(umap_country_sp[, 1:2]))
+
+d_coloc_c_upper <- dist_coloc_c[upper.tri(dist_coloc_c)]
+d_spear_c_upper <- dist_spear_c[upper.tri(dist_spear_c)]
+
+cat("Country UMAP distance correlation (Spearman):",
+    round(cor(d_coloc_c_upper, d_spear_c_upper, method = "spearman"), 3), "\n")
+```
+
+## ECI vs PCA comparison
+
+The eigenvalue-based ECI extracts a single dimension of complexity from the co-location
+structure. PCA extracts dimensions of variance from the raw data. How do they relate?
+
+```{r eci-vs-pca}
+compare_df <- tibble(
+  country = rownames(Mcp),
+  ICI = eci_eigen,
+  PC1 = pca_result$x[, 1],
+  PC2 = pca_result$x[, 2],
+  diversity = kc0
+) %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  )
+
+ggplot(compare_df, aes(x = ICI, y = PC1)) +
+  geom_point(aes(color = region), size = 2.5, alpha = 0.7) +
+  geom_smooth(method = "lm", color = gl$text_muted, linetype = "dashed", se = TRUE, alpha = 0.15) +
+  geom_text_repel(aes(label = country), size = 2.5, max.overlaps = 15) +
+  labs(x = "ICI (eigenvalue method)", y = "PC1 score")
+
+save_fig("full", "eci_vs_pca.pdf")
+
+cat("Correlation ICI vs PC1:", round(cor(compare_df$ICI, compare_df$PC1), 3), "\n")
+cat("Correlation ICI vs PC2:", round(cor(compare_df$ICI, compare_df$PC2), 3), "\n")
 ```
 
 # Additional Visualizations
 
 ## Heatmap of the Mcp Matrix
 
-```{r heatmap, fig.width=14, fig.height=10}
-# Cluster and plot heatmap
-# Add category annotations for columns
-col_annotation <- indicator_info %>%
-  filter(code %in% colnames(Mcp)) %>%
-  select(code, category) %>%
-  column_to_rownames("code")
+```{r heatmap, fig.width=6.5, fig.height=6.5}
+# Order columns by ubiquity (most ubiquitous = left) and rows by diversity (most diverse = top)
+col_order <- names(sort(kp0, decreasing = TRUE))
+row_order <- names(sort(kc0, decreasing = TRUE))
 
-# Add region annotations for rows
-row_annotation <- tibble(
-  country = rownames(Mcp),
-  Region = region_labels[as.character(region_lookup[rownames(Mcp)])]
-) %>%
-  mutate(Region = replace_na(Region, "Other")) %>%
-  column_to_rownames("country")
-
-# Annotation colors
-ann_colors <- list(
-  category = setNames(cat_colors, unique(col_annotation$category)),
-  Region = region_colors[unique(row_annotation$Region)]
-)
+Mcp_ordered <- Mcp[row_order, col_order]
 
 pheatmap(
-  Mcp,
-  color = c("grey95", "steelblue"),
-  legend_breaks = c(0, 1),
-  legend_labels = c("Absent", "Present"),
-  annotation_col = col_annotation,
-  annotation_row = row_annotation,
-  annotation_colors = ann_colors,
+  Mcp_ordered,
+  color = colorRampPalette(c("grey95", gl$brand_blue))(100),
   show_rownames = FALSE,
   show_colnames = FALSE,
-  clustering_method = "ward.D2",
-  main = "Country x Institutional Feature Matrix (Mcp)",
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
   fontsize = 8
 )
 ```
@@ -909,7 +1865,7 @@ eci_gdp <- eci_df %>%
 cat("Countries matched with GDP data:", nrow(eci_gdp), "\n")
 ```
 
-```{r eci-vs-gdp, fig.width=10, fig.height=8}
+```{r eci-vs-gdp}
 # Add regions
 eci_gdp <- eci_gdp %>%
   mutate(
@@ -923,26 +1879,23 @@ cor_gdp <- cor(eci_gdp$ICI, log(eci_gdp$gdp_pc), use = "complete.obs")
 
 ggplot(eci_gdp, aes(x = ICI, y = gdp_pc)) +
   geom_point(aes(color = region), size = 3, alpha = 0.7) +
-  geom_smooth(method = "lm", color = "grey30", linetype = "dashed", se = TRUE, alpha = 0.15) +
+  geom_smooth(method = "lm", color = gl$text_muted, linetype = "dashed", se = TRUE, alpha = 0.15) +
   geom_text_repel(
     aes(label = country.x),
     size = 2.5, max.overlaps = 15
   ) +
   scale_y_log10(labels = scales::dollar_format()) +
-  scale_color_manual(values = region_colors, name = "Region") +
   labs(
-    title = "Institutional Complexity vs GDP per Capita",
-    subtitle = sprintf("Correlation with log GDP: %.2f", cor_gdp),
     x = "Institutional Complexity Index (ICI)",
     y = "GDP per capita (PPP, constant $, log scale)"
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(plot.title = element_text(face = "bold", size = 16))
+  )
+
+save_fig("full", "ici_vs_gdp.pdf")
 ```
 
 ## ICI vs Liberal Democracy Index
 
-```{r eci-vs-libdem, fig.width=10, fig.height=8}
+```{r eci-vs-libdem}
 # Get liberal democracy index
 libdem <- vdem_raw %>%
   filter(year == latest_year) %>%
@@ -957,29 +1910,27 @@ eci_libdem <- eci_df %>%
     region = replace_na(region, "Other")
   )
 
-cor_libdem <- cor(eci_libdem$ICI, eci_libdem$v2x_libdem, use = "complete.obs")
+cor_libdem <- cor(eci_libdem$ICI, log(eci_libdem$v2x_libdem), use = "complete.obs")
 
 ggplot(eci_libdem, aes(x = ICI, y = v2x_libdem)) +
   geom_point(aes(color = region), size = 3, alpha = 0.7) +
-  geom_smooth(method = "lm", color = "grey30", linetype = "dashed", se = TRUE, alpha = 0.15) +
+  geom_smooth(method = "lm", color = gl$text_muted, linetype = "dashed", se = TRUE, alpha = 0.15) +
   geom_text_repel(
     aes(label = country),
     size = 2.5, max.overlaps = 15
   ) +
-  scale_color_manual(values = region_colors, name = "Region") +
+  scale_y_log10() +
   labs(
-    title = "Institutional Complexity vs Liberal Democracy",
-    subtitle = sprintf("Correlation: %.2f", cor_libdem),
     x = "Institutional Complexity Index (ICI)",
-    y = "V-Dem Liberal Democracy Index"
-  ) +
-  theme_minimal(base_size = 13) +
-  theme(plot.title = element_text(face = "bold", size = 16))
+    y = "V-Dem Liberal Democracy Index (log scale)"
+  )
+
+save_fig("full", "ici_vs_libdem.pdf")
 ```
 
 ## ICI by World Region
 
-```{r eci-by-region, fig.width=10, fig.height=7}
+```{r eci-by-region}
 eci_regions <- eci_df %>%
   mutate(
     region = region_labels[as.character(region_lookup[country])],
@@ -991,14 +1942,9 @@ ggplot(eci_regions, aes(x = reorder(region, ICI, median), y = ICI, fill = region
   geom_boxplot(alpha = 0.7, show.legend = FALSE, outlier.alpha = 0.3) +
   geom_jitter(aes(color = region), width = 0.15, alpha = 0.5, size = 1.5, show.legend = FALSE) +
   coord_flip() +
-  scale_fill_manual(values = region_colors) +
-  scale_color_manual(values = region_colors) +
-  labs(
-    title = "Institutional Complexity Index by World Region",
-    x = NULL, y = "Institutional Complexity Index (ICI)"
-  ) +
-  theme_minimal(base_size = 14) +
-  theme(plot.title = element_text(face = "bold", size = 16))
+  labs(x = NULL, y = "Institutional Complexity Index (ICI)")
+
+save_fig("full", "ici_by_region.pdf")
 ```
 
 # Discussion
@@ -1025,12 +1971,32 @@ aspects of governance: rigorous and impartial public administration, judicial ac
 freedom from self-censorship in media, and deliberative quality of political discourse.
 These are features that require not just formal rules but deeply embedded norms and practices.
 
+## Methodological notes
+
+This analysis uses a **continuous Mcp matrix** (min-max normalized to [0, 1]) rather than
+the traditional binary matrix. This preserves the full variation in V-Dem's IRT-derived
+scores and avoids arbitrary binarization thresholds. Two discrete integer variables
+(v2regopploc, v2regsuploc) were excluded since they do not sit on comparable continuous
+scales.
+
+We compute proximity using two methods:
+
+1. **Co-location proximity** (EC-style): the continuous generalization of the Hidalgo et al.
+   minimum conditional probability. Captures whether high values tend to co-occur.
+
+2. **Spearman rank correlation**: captures the full monotonic relationship between indicators
+   (or countries), including agreement at the bottom of the distribution. Rescaled to [0, 1]
+   for comparability.
+
+The comparison between these methods tests whether the institution space structure is
+driven primarily by which countries score *high* on features (co-location) or by the full
+rank ordering (Spearman). PCA provides a multi-dimensional view complementary to the single
+ECI axis.
+
 ## Caveats
 
-Several important limitations:
-
-1. **V-Dem data reflects expert assessments**, not objective measures. The binarization choices
-   affect results significantly.
+1. **V-Dem data reflects expert assessments**, not objective measures. The normalization
+   choices (min-max vs z-score vs rank) affect results.
 
 2. **The analogy has limits.** Countries don't "choose" institutions the way firms choose
    products to export. Institutional development is path-dependent, often violent, and
@@ -1056,8 +2022,9 @@ Several important limitations:
   feasible for countries at different positions in the institution space?
 - Comparison with actual Economic Complexity Index: are economically and institutionally
   complex countries the same?
+- Alternative normalizations: rank-based or z-score normalization instead of min-max
 
 ---
 
-*Analysis generated on `r Sys.Date()`. Data from V-Dem v`r packageVersion("vdemdata")` and
-World Development Indicators.*
+*Analysis generated on `r Sys.Date()`. Data from V-Dem (loaded from `~/dev/shared-data/vdem/`)
+and World Development Indicators.*
