@@ -1233,6 +1233,401 @@ ggsave("imgs/umap_country_space_spearman_eci.png",
        width = 9, height = 9, dpi = 300)
 ```
 
+## Z-scored IRT Institution Space (UMAP)
+
+We mirror the country-space logic for institutions. Each institution is a vector in
+country-space (one entry per country); two institutions are close if they vary similarly
+across countries. To make every country contribute equally to inter-institution distance,
+we z-score across countries (i.e., scale the columns of the transposed matrix). The
+imputation step from the country pipeline produces `Mcp_raw` and is reused here.
+
+```{r institution-zscore-matrix, cache=TRUE}
+# Raw IRT country × feature matrix (no min-max normalization)
+Mcp_raw <- vdem_filtered %>%
+  select(country_name, all_of(indicator_info$code)) %>%
+  column_to_rownames("country_name") %>%
+  as.matrix()
+
+# Impute NAs with column mean (IRT scores are roughly mean-centered globally,
+# so a within-sample column mean is a reasonable neutral imputation)
+for (j in seq_len(ncol(Mcp_raw))) {
+  na_idx <- is.na(Mcp_raw[, j])
+  if (any(na_idx)) {
+    Mcp_raw[na_idx, j] <- mean(Mcp_raw[, j], na.rm = TRUE)
+  }
+}
+
+# Institution × country matrix; z-score each country column so each country
+# contributes equally to distances between institutions
+Mpc_z <- scale(t(Mcp_raw), center = TRUE, scale = TRUE)
+
+cat("Institution z-scored matrix:", nrow(Mpc_z), "features x", ncol(Mpc_z), "countries\n")
+cat("Per-country SD after scaling (should be 1):",
+    round(mean(apply(Mpc_z, 2, sd)), 3), "\n")
+```
+
+```{r umap-institution-zscore, cache=TRUE}
+set.seed(42)
+umap_inst_z <- umap(Mpc_z, n_neighbors = 15, min_dist = 0.1, n_epochs = 500)
+
+umap_inst_z_df <- tibble(
+  indicator = rownames(Mpc_z),
+  UMAP1 = umap_inst_z[, 1],
+  UMAP2 = umap_inst_z[, 2]
+) %>%
+  left_join(indicator_info, by = c("indicator" = "code"))
+```
+
+```{r umap-institution-zscore-plot, fig.width=6.5, fig.height=6.5}
+n_cats_z <- length(unique(umap_inst_z_df$category))
+cat_colors_z <- colorRampPalette(gl_palettes$categorical)(n_cats_z)
+
+umap_inst_z_df <- umap_inst_z_df %>%
+  mutate(label = str_trunc(description, 35) %>% str_wrap(width = 20))
+
+ggplot(umap_inst_z_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = category), size = 2.5, alpha = 0.75) +
+  geom_text_repel(
+    aes(label = label),
+    size = 1.8, max.overlaps = 20, segment.alpha = 0.3, lineheight = 0.85
+  ) +
+  scale_color_manual(values = cat_colors_z, name = "Category") +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/umap_institution_space_zscored.png", width = 9, height = 9, dpi = 300)
+```
+
+## Z-scored IRT Country Space (UMAP)
+
+The Spearman pipeline operates on min-max normalized scores and rank correlations, which
+discards the "1 unit ~= 1 SD" property of V-Dem's IRT measurement model. As an alternative,
+we build a country embedding directly on the raw IRT scores: impute missing values with
+the feature mean, z-score each indicator across the country sample (so every feature
+contributes equally to Euclidean distance), and feed the coordinates straight to UMAP.
+No MDS step is needed — the input is already Euclidean.
+
+```{r country-zscore-matrix, cache=TRUE}
+# Z-score each feature across countries: 1 unit = 1 sample SD on that indicator
+Mcp_z <- scale(Mcp_raw, center = TRUE, scale = TRUE)
+
+cat("Z-scored matrix:", nrow(Mcp_z), "countries x", ncol(Mcp_z), "features\n")
+cat("Per-feature SD after scaling (should be 1):",
+    round(mean(apply(Mcp_z, 2, sd)), 3), "\n")
+```
+
+```{r umap-country-zscore, cache=TRUE}
+set.seed(42)
+umap_country_z <- umap(Mcp_z, n_neighbors = 15, min_dist = 0.2, n_epochs = 500)
+
+umap_country_z_df <- tibble(
+  country = rownames(Mcp_z),
+  UMAP1 = umap_country_z[, 1],
+  UMAP2 = umap_country_z[, 2]
+) %>%
+  mutate(
+    region = region_labels[as.character(region_lookup[country])],
+    region = replace_na(region, "Other")
+  )
+```
+
+```{r umap-country-zscore-plot, fig.width=6.5, fig.height=6.5}
+ggplot(umap_country_z_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = region), size = 2.5, alpha = 0.75) +
+  geom_text_repel(
+    aes(label = country),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3
+  ) +
+  labs(x = "UMAP 1", y = "UMAP 2") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/umap_country_space_zscored.png", width = 9, height = 9, dpi = 300)
+```
+
+## Clustering the Z-scored Country Space
+
+K-means runs on the **full z-scored matrix** (`Mcp_z`), not on the 2D UMAP coordinates.
+The UMAP is for visualization; clusters should reflect the actual high-dimensional feature
+space. We use the elbow + silhouette diagnostic across k = 2..12 to pick the cluster count.
+
+```{r kmeans-country-zscore-diagnostics, cache=TRUE, fig.width=6.5, fig.height=3}
+country_z_diag <- map_dfr(2:12, function(k) {
+  set.seed(1)
+  km <- kmeans(Mcp_z, centers = k, nstart = 50, iter.max = 200)
+  sil <- silhouette(km$cluster, dist(Mcp_z))
+  tibble(k = k, wss = km$tot.withinss, sil = mean(sil[, 3]))
+})
+
+p_wss_z <- ggplot(country_z_diag, aes(k, wss)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:12) +
+  labs(x = "k", y = "Within-cluster SS")
+p_sil_z <- ggplot(country_z_diag, aes(k, sil)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:12) +
+  labs(x = "k", y = "Mean silhouette width")
+
+p_wss_z + p_sil_z
+save_fig("full", "kmeans_country_zscore_diagnostics.pdf")
+```
+
+```{r kmeans-country-zscore-fit, cache=TRUE}
+set.seed(1)
+N_CLUSTERS_Z <- 6
+km_country_z <- kmeans(Mcp_z, centers = N_CLUSTERS_Z, nstart = 50, iter.max = 200)
+
+umap_country_z_df <- umap_country_z_df %>%
+  mutate(cluster_z = km_country_z$cluster)
+
+# Per-cluster z-deviation: since Mcp_z is already centered/scaled across countries,
+# colMeans on cluster members IS the z-score deviation from the global mean.
+cluster_summaries_z <- map(sort(unique(km_country_z$cluster)), function(cl) {
+  members <- umap_country_z_df %>% filter(cluster_z == cl) %>% pull(country)
+  z <- colMeans(Mcp_z[members, , drop = FALSE])
+  high_idx <- order(z, decreasing = TRUE)[1:12]
+  low_idx  <- order(z, decreasing = FALSE)[1:12]
+  list(
+    cluster = cl,
+    n = length(members),
+    members = members,
+    top_strengths = tibble(
+      code = names(z)[high_idx],
+      description = indicator_desc[names(z)[high_idx]],
+      z = unname(z[high_idx])
+    ),
+    top_weaknesses = tibble(
+      code = names(z)[low_idx],
+      description = indicator_desc[names(z)[low_idx]],
+      z = unname(z[low_idx])
+    )
+  )
+})
+names(cluster_summaries_z) <- as.character(sort(unique(km_country_z$cluster)))
+
+# Persist for downstream labeling
+saveRDS(cluster_summaries_z, "scratch/cluster_summaries_z.rds")
+```
+
+```{r kmeans-country-zscore-print, results='asis'}
+for (cl in sort(unique(km_country_z$cluster))) {
+  s <- cluster_summaries_z[[as.character(cl)]]
+  cat("\n\n**Cluster ", cl, "** (n = ", s$n, ")\n\n", sep = "")
+  cat("_Members:_ ", paste(s$members, collapse = ", "), "\n\n", sep = "")
+  cat("\n_Top distinctive strengths (z vs global):_\n\n")
+  print(kable(s$top_strengths, digits = 2))
+  cat("\n_Top distinctive weaknesses (z vs global):_\n\n")
+  print(kable(s$top_weaknesses, digits = 2))
+}
+```
+
+### Cluster labels
+
+Labels were generated by inspecting each cluster's distinctive strengths/weaknesses and
+member list (the tables above). They emphasize **institutional type**, not regime quality
+alone — e.g. clusters 4 and 6 are both closed regimes, but cluster 4 is distinguished by
+high state capacity (especially digital surveillance/control infrastructure) while cluster
+6 reads as personalist/totalitarian with extreme repression and no civil society.
+
+```{r kmeans-country-zscore-labels}
+country_z_cluster_labels <- c(
+  "1" = "Conflict-Prone Repressive Regimes",
+  "2" = "Consolidated Liberal Democracies",
+  "3" = "Contentious Hybrid Regimes",
+  "4" = "Closed Capable Autocracies",
+  "5" = "Stable Middle Democracies",
+  "6" = "Personalist / Totalitarian Regimes"
+)
+
+umap_country_z_df <- umap_country_z_df %>%
+  mutate(
+    cluster_label_z = factor(
+      country_z_cluster_labels[as.character(cluster_z)],
+      levels = unname(country_z_cluster_labels)
+    )
+  )
+
+# Verify all clusters labelled
+stopifnot(!any(is.na(umap_country_z_df$cluster_label_z)))
+```
+
+### Cluster-colored Country Space
+
+Same UMAP coordinates as before, recolored by cluster, with the cluster label drawn at
+each cluster's centroid (median UMAP position).
+
+```{r umap-country-zscore-cluster-plot, fig.width=6.5, fig.height=6.5}
+country_z_centroids <- umap_country_z_df %>%
+  group_by(cluster_label_z) %>%
+  summarise(UMAP1 = median(UMAP1), UMAP2 = median(UMAP2), .groups = "drop")
+
+country_z_cluster_colors <- colorRampPalette(gl_palettes$categorical)(N_CLUSTERS_Z)
+names(country_z_cluster_colors) <- levels(umap_country_z_df$cluster_label_z)
+
+ggplot(umap_country_z_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = cluster_label_z), size = 2.5, alpha = 0.75,
+             show.legend = FALSE) +
+  geom_text_repel(
+    aes(label = country, color = cluster_label_z),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3,
+    show.legend = FALSE
+  ) +
+  geom_label(
+    data = country_z_centroids,
+    aes(label = cluster_label_z, fill = cluster_label_z),
+    size = 3.2, fontface = "bold", color = "white",
+    label.padding = unit(0.35, "lines"), label.r = unit(0.25, "lines"),
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = country_z_cluster_colors) +
+  scale_fill_manual(values = country_z_cluster_colors) +
+  labs(x = "UMAP 1", y = "UMAP 2")
+
+ggsave("imgs/umap_country_space_zscored_clusters.png",
+       width = 9, height = 9, dpi = 300)
+```
+
+## Clustering on the 2D UMAP coordinates
+
+For comparison, we re-run k-means on the **2D UMAP coordinates** (`UMAP1`, `UMAP2`) rather
+than the full `Mcp_z` matrix. UMAP preserves local structure but distorts global gaps, so
+the clusters discovered here are the visible point-blobs in the chart. We keep k = 6 and
+the same downstream labeling pipeline.
+
+```{r kmeans-country-zscore-2d-diagnostics, cache=TRUE, fig.width=6.5, fig.height=3}
+coords_z_2d <- as.matrix(umap_country_z_df[, c("UMAP1", "UMAP2")])
+
+country_z_2d_diag <- map_dfr(2:12, function(k) {
+  set.seed(1)
+  km <- kmeans(coords_z_2d, centers = k, nstart = 50, iter.max = 200)
+  sil <- silhouette(km$cluster, dist(coords_z_2d))
+  tibble(k = k, wss = km$tot.withinss, sil = mean(sil[, 3]))
+})
+
+p_wss_z_2d <- ggplot(country_z_2d_diag, aes(k, wss)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:12) +
+  labs(x = "k", y = "Within-cluster SS")
+p_sil_z_2d <- ggplot(country_z_2d_diag, aes(k, sil)) +
+  geom_line() + geom_point() +
+  scale_x_continuous(breaks = 2:12) +
+  labs(x = "k", y = "Mean silhouette width")
+
+p_wss_z_2d + p_sil_z_2d
+save_fig("full", "kmeans_country_zscore_2d_diagnostics.pdf")
+```
+
+```{r kmeans-country-zscore-2d-fit, cache=TRUE}
+set.seed(1)
+N_CLUSTERS_Z_2D <- 6
+km_country_z_2d <- kmeans(coords_z_2d, centers = N_CLUSTERS_Z_2D,
+                          nstart = 50, iter.max = 200)
+
+umap_country_z_df <- umap_country_z_df %>%
+  mutate(cluster_z_2d = km_country_z_2d$cluster)
+
+# Cluster summaries: even though clustering ran on UMAP coords, we still characterize
+# clusters by their distinctive Mcp_z features so labels remain interpretable.
+cluster_summaries_z_2d <- map(sort(unique(km_country_z_2d$cluster)), function(cl) {
+  members <- umap_country_z_df %>% filter(cluster_z_2d == cl) %>% pull(country)
+  z <- colMeans(Mcp_z[members, , drop = FALSE])
+  high_idx <- order(z, decreasing = TRUE)[1:12]
+  low_idx  <- order(z, decreasing = FALSE)[1:12]
+  list(
+    cluster = cl,
+    n = length(members),
+    members = members,
+    top_strengths = tibble(
+      code = names(z)[high_idx],
+      description = indicator_desc[names(z)[high_idx]],
+      z = unname(z[high_idx])
+    ),
+    top_weaknesses = tibble(
+      code = names(z)[low_idx],
+      description = indicator_desc[names(z)[low_idx]],
+      z = unname(z[low_idx])
+    )
+  )
+})
+names(cluster_summaries_z_2d) <- as.character(sort(unique(km_country_z_2d$cluster)))
+
+saveRDS(cluster_summaries_z_2d, "scratch/cluster_summaries_z_2d.rds")
+```
+
+```{r kmeans-country-zscore-2d-print, results='asis'}
+for (cl in sort(unique(km_country_z_2d$cluster))) {
+  s <- cluster_summaries_z_2d[[as.character(cl)]]
+  cat("\n\n**Cluster ", cl, "** (n = ", s$n, ")\n\n", sep = "")
+  cat("_Members:_ ", paste(s$members, collapse = ", "), "\n\n", sep = "")
+  cat("\n_Top distinctive strengths (z vs global):_\n\n")
+  print(kable(s$top_strengths, digits = 2))
+  cat("\n_Top distinctive weaknesses (z vs global):_\n\n")
+  print(kable(s$top_weaknesses, digits = 2))
+}
+```
+
+### Cluster labels (2D UMAP clustering)
+
+The 2D-UMAP partition shifts the taxonomy in two visible ways relative to the full-matrix
+version: it **merges** capable autocracies (China, Russia, Saudi) with personalist/total
+regimes (North Korea, Belarus, Eritrea) into one closed-autocracies cluster — they sit
+adjacent in the embedding, so 2D k-means can't separate them — and it **splits** the
+broad "stable middle democracies" group along regional/structural lines, surfacing a
+distinct polarized post-communist + Latin American cluster.
+
+```{r kmeans-country-zscore-2d-labels}
+country_z_2d_cluster_labels <- c(
+  "1" = "Developing / Mid-tier Democracies",
+  "2" = "Fragile / Conflict-Prone States",
+  "3" = "Small Stable Democracies",
+  "4" = "Polarized Post-Communist & Latin Democracies",
+  "5" = "Closed Autocracies",
+  "6" = "Consolidated Liberal Democracies"
+)
+
+umap_country_z_df <- umap_country_z_df %>%
+  mutate(
+    cluster_label_z_2d = factor(
+      country_z_2d_cluster_labels[as.character(cluster_z_2d)],
+      levels = unname(country_z_2d_cluster_labels)
+    )
+  )
+
+stopifnot(!any(is.na(umap_country_z_df$cluster_label_z_2d)))
+```
+
+### Cluster-colored Country Space (2D UMAP clustering)
+
+```{r umap-country-zscore-2d-cluster-plot, fig.width=6.5, fig.height=6.5}
+country_z_2d_centroids <- umap_country_z_df %>%
+  group_by(cluster_label_z_2d) %>%
+  summarise(UMAP1 = median(UMAP1), UMAP2 = median(UMAP2), .groups = "drop")
+
+country_z_2d_cluster_colors <- colorRampPalette(gl_palettes$categorical)(N_CLUSTERS_Z_2D)
+names(country_z_2d_cluster_colors) <- levels(umap_country_z_df$cluster_label_z_2d)
+
+ggplot(umap_country_z_df, aes(x = UMAP1, y = UMAP2)) +
+  geom_point(aes(color = cluster_label_z_2d), size = 2.5, alpha = 0.75,
+             show.legend = FALSE) +
+  geom_text_repel(
+    aes(label = country, color = cluster_label_z_2d),
+    size = 2.5, max.overlaps = 25, segment.alpha = 0.3,
+    show.legend = FALSE
+  ) +
+  geom_label(
+    data = country_z_2d_centroids,
+    aes(label = cluster_label_z_2d, fill = cluster_label_z_2d),
+    size = 3.2, fontface = "bold", color = "white",
+    label.padding = unit(0.35, "lines"), label.r = unit(0.25, "lines"),
+    show.legend = FALSE
+  ) +
+  scale_color_manual(values = country_z_2d_cluster_colors) +
+  scale_fill_manual(values = country_z_2d_cluster_colors) +
+  labs(x = "UMAP 1", y = "UMAP 2")
+
+ggsave("imgs/umap_country_space_zscored_clusters_2d.png",
+       width = 9, height = 9, dpi = 300)
+```
+
 ## Alternative Clustering: Original Features vs. PCA vs. UMAP
 
 The clusters above were fit on the 2D UMAP coordinates — i.e., k-means is partitioning the
