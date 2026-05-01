@@ -5,9 +5,11 @@ governance data. The output of each `.Rmd` is a self-contained PDF.
 
 | File | Output | What it answers |
 |---|---|---|
-| `institutional_complexity.Rmd` | `institutional_complexity.pdf` | How do institutional *features* cluster? Which countries hold complex institutional portfolios? |
-| `outcomes_ml.Rmd` | `outcomes_ml.pdf` | Which institutional bundles *predict* fiscal, health, education, complexity, and trade outcomes? Where do specific countries over-/under-perform their institutional fingerprint? |
-| `cambodia-pca-peers-analysis.md` | — | Standalone narrative: Cambodia's PC1/PC2 position decomposed feature-by-feature against its Mekong neighbours. |
+| `analyses/institutional_complexity.Rmd` | `analyses/institutional_complexity.pdf` | How do institutional *features* cluster? Which countries hold complex institutional portfolios? |
+| `analyses/outcomes_ml.Rmd` | `analyses/outcomes_ml.pdf` | Which institutional bundles *predict* fiscal, health, education, complexity, and trade outcomes? Where do specific countries over-/under-perform their institutional fingerprint? |
+| `analyses/deals-development.Rmd` | `analyses/deals-development.pdf` | Maps V-Dem/QoG indicators to the Pritchett-Sen-Werker stakeholder typology to score country-by-stakeholder fit. |
+| `case-studies/cambodia/cambodia-history.Rmd` | `case-studies/cambodia/cambodia-history.pdf` | Cambodia 1970–2025: institutional fingerprint trajectory passed through the cross-sectional ML model. |
+| `case-studies/cambodia/cambodia-pca-peers-analysis.md` | — | Standalone narrative: Cambodia's PC1/PC2 position decomposed feature-by-feature against its Mekong neighbours. |
 
 `TASK.md` is the original task spec for `institutional_complexity.Rmd`. Treat it as
 historical — the actual code has evolved past it.
@@ -96,7 +98,8 @@ When choosing a new outcome variable from the macro parquet, **use the
 
 ## Caching
 
-Both Rmds use `cache=TRUE` globally. Cache dirs (`*_cache/`) are gitignored.
+All Rmds use `cache=TRUE` globally. Cache dirs (`*_cache/`) live next to each Rmd
+and are gitignored.
 
 **Knitr cache invalidation only checks the chunk's own code** — not its dependencies.
 If you edit `outcome_meta` (or anything that changes upstream objects without
@@ -104,7 +107,7 @@ changing downstream chunk source), you must manually delete the stale cache file
 for downstream chunks. The pattern that works:
 
 ```bash
-cd outcomes_ml_cache/latex
+cd analyses/outcomes_ml_cache/latex
 rm -f join_* run-sweep_* sweep-table_* sweep-plot_* best-depth-table_* \
       per-outcome-plots_* predict-focus-countries_* residual-heatmap_* \
       scorecard-table_* pca-outcome-regression_* pca-quadrant-heatmap_* \
@@ -116,16 +119,30 @@ The PCA / institutional-peer chunks are independent of `outcome_meta` and stay v
 ## Files map
 
 ```
-institutional_complexity.Rmd      ← main complexity analysis
-institutional_complexity.pdf      ← knitted output
-outcomes_ml.Rmd                   ← ML extension: institutions → outcomes
-outcomes_ml.pdf                   ← knitted output
-cambodia-pca-peers-analysis.md    ← Cambodia narrative (PC-space peer decomposition)
-TASK.md                           ← original spec for institutional_complexity.Rmd (stale)
-imgs/                             ← exported figures (mostly from institutional_complexity.Rmd)
-scratch/                          ← exploratory R scripts (gitignored)
-*_cache/, *_files/                ← knitr caches and figure dirs (gitignored)
+analyses/
+  institutional_complexity.Rmd     ← main complexity analysis
+  institutional_complexity.pdf     ← knitted output
+  outcomes_ml.Rmd                  ← ML extension: institutions → outcomes
+  outcomes_ml.pdf                  ← knitted output
+  deals-development.Rmd            ← Pritchett-Sen-Werker stakeholder fit
+  deals-development.pdf            ← knitted output
+  deals-and-development.md         ← workstream notes
+case-studies/
+  cambodia/
+    cambodia-history.Rmd           ← 1970–2025 trajectory through the ML model
+    cambodia-history.pdf           ← knitted output
+    cambodia-pca-peers-analysis.md ← PC-space peer decomposition narrative
+    thoughts-cambodia.md           ← scratch notes
+TASK.md                            ← original spec for institutional_complexity.Rmd (stale)
+imgs/                              ← exported figures (shared across analyses)
+outputs/                           ← exported CSVs (shared across analyses)
+scratch/                           ← exploratory R scripts (gitignored)
+*_cache/, *_files/                 ← knitr caches and figure dirs (gitignored)
 ```
+
+Each Rmd sets `knitr::opts_knit$set(root.dir = ...)` in its setup chunk so that
+relative paths (`imgs/`, `outputs/`, `scratch/`, `~/dev/shared-data/...`) resolve
+from the project root regardless of where the Rmd is nested.
 
 ## Required R packages
 

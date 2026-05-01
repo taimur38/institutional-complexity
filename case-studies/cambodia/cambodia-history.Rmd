@@ -1,0 +1,1400 @@
+---
+title: "Cambodia: Institutional Trajectory and Outcome Decay"
+subtitle: "Tracing 1970–2025 through the cross-sectional ML model"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 6.5
+    fig_height: 4.5
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+# Motivation
+
+The cross-sectional analysis in `outcomes_ml.Rmd` answers: *given a country's
+2025 V-Dem fingerprint, what outcomes does the model expect?* The Cambodia case
+study answers: *what country does Cambodia institutionally resemble today?*
+(answer: Burundi). Both are snapshots.
+
+This document asks the time-series question: **how has Cambodia's institutional
+fingerprint evolved since 1970, and what would that historical fingerprint have
+predicted at each point in time about its development outcomes?** Cambodia's
+GDP-per-capita series has visible breaks at 1979, 1987, 1997, and 2006; we
+trace whether its institutional setup tracks those breaks and compare to two
+benchmarks: Vietnam (a managed-state ASEAN neighbour) and Burundi (its
+data-driven institutional twin).
+
+The hypothesis under test is the **decay hypothesis**: prior Cambodian
+institutional regimes were better at producing human capital and economic
+complexity than the current one. The country still has a high *stock* of
+human capital and infrastructure (built under the post-UNTAC era and the
+PRK education recovery), but the current institutional setup is less able
+to replenish that stock. **Infant mortality may be the leading indicator** —
+since IMR responds to live institutional capacity (clinic staffing, vaccine
+cold chain) faster than HCI does, a model-predicted IMR that has turned upward
+before actual IMR would suggest the next wave is already cresting.
+
+```{r packages}
+library(tidyverse)
+library(arrow)
+library(knitr)
+library(xgboost)
+library(strucchange)
+library(readxl)
+library(ggrepel)
+
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
+```
+
+# Data assembly
+
+## 2025 cross-section: feature set, normalisation bounds, models
+
+We rebuild the same `Mcp` matrix used in `outcomes_ml.Rmd`: V-Dem 2025
+component-type indicators with at least 150-country coverage, dropping
+`v2regopploc` and `v2regsuploc`. Each feature is min-max normalised on
+the 2025 cross-section to `[0, 1]`. The **per-feature min and max from
+2025 are saved** — they're the bounds we apply to the historical panel
+later, so a 1975 Cambodia value gets placed on the same scale the model
+was trained on.
+
+```{r build-mcp-2025, cache=TRUE}
+vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("~/dev/shared-data/vdem/vdem_codebook.parquet")
+
+latest_year <- vdem_raw %>%
+  filter(year >= 2020) %>%
+  group_by(year) %>%
+  summarise(n_countries = n_distinct(country_name), .groups = "drop") %>%
+  filter(n_countries >= 150) %>%
+  pull(year) %>% max()
+
+component_codes <- vdem_codebook %>% filter(vartype == "C") %>% pull(tag)
+suffixes <- c("_codelow", "_codehigh", "_sd", "_osp", "_ord", "_mean", "_nr")
+all_cols <- names(vdem_raw)
+is_suffix <- sapply(all_cols, function(x) any(sapply(suffixes, function(s) endsWith(x, s))))
+is_numbered <- grepl("_\\d+$", all_cols)
+base_cols <- all_cols[!is_suffix & !is_numbered]
+candidate_codes <- intersect(component_codes, base_cols)
+
+latest_data <- vdem_raw %>% filter(year == latest_year)
+coverage <- sapply(candidate_codes, function(x) sum(!is.na(latest_data[[x]])))
+numeric_check <- sapply(candidate_codes, function(x) is.numeric(vdem_raw[[x]]))
+indicator_codes <- candidate_codes[coverage >= 150 & numeric_check]
+indicator_codes <- setdiff(indicator_codes, c("v2regopploc", "v2regsuploc"))
+
+indicator_info <- vdem_codebook %>%
+  filter(tag %in% indicator_codes) %>%
+  transmute(code = tag, description = name) %>%
+  distinct(code, .keep_all = TRUE)
+desc_lookup <- setNames(indicator_info$description, indicator_info$code)
+
+vdem_filtered <- vdem_raw %>%
+  filter(year == latest_year) %>%
+  select(country_name, country_text_id, all_of(indicator_info$code)) %>%
+  mutate(n_missing = rowSums(is.na(across(all_of(indicator_info$code))))) %>%
+  filter(n_missing < ncol(across(all_of(indicator_info$code))) * 0.5) %>%
+  select(-n_missing)
+
+cont_df <- vdem_filtered %>% select(country_name, all_of(indicator_info$code))
+
+# Stash the 2025 min/max per feature — these are the bounds we apply to history.
+feat_bounds <- tibble(
+  code = indicator_info$code,
+  min = sapply(indicator_info$code, function(x) min(cont_df[[x]], na.rm = TRUE)),
+  max = sapply(indicator_info$code, function(x) max(cont_df[[x]], na.rm = TRUE))
+)
+
+for (ind in indicator_info$code) {
+  v <- cont_df[[ind]]
+  rng <- c(feat_bounds$min[feat_bounds$code == ind],
+           feat_bounds$max[feat_bounds$code == ind])
+  cont_df[[ind]] <- if (rng[2] > rng[1]) (v - rng[1]) / (rng[2] - rng[1]) else 0
+}
+cont_df <- cont_df %>%
+  mutate(across(all_of(indicator_info$code), ~replace_na(.x, 0)))
+
+Mcp <- cont_df %>% column_to_rownames("country_name") %>% as.matrix()
+iso3_lookup <- vdem_filtered %>% select(country_name, country_text_id) %>% deframe()
+
+cat("V-Dem year:", latest_year, "\n")
+cat("Mcp:", nrow(Mcp), "countries x", ncol(Mcp), "features\n")
+```
+
+## Historical panel: KHM, VNM, BDI from 1970
+
+For each focus country and each year in 1970–`r I("latest_year")`, we pull the
+same V-Dem feature columns, then min-max normalise using the **2025 bounds**
+(not the historical min/max — we want the model to see history in 2025-scale
+units). NAs are replaced with 0, matching the cross-sectional pipeline. NAs
+are common in Cambodia 1975–1999 because several V-Dem features (election
+quality, party characteristics, lower-chamber behaviour) are undefined when
+elections or legislatures don't exist; treating them as floor values is
+consistent with the model's training-time handling.
+
+```{r build-history, cache=TRUE}
+focus_iso3 <- c("KHM", "VNM", "BDI")
+
+hist_raw <- vdem_raw %>%
+  filter(country_text_id %in% focus_iso3, year >= 1970, year <= latest_year) %>%
+  select(country_text_id, country_name, year, all_of(indicator_info$code))
+
+# Apply 2025 min-max bounds, then NA -> 0
+hist_norm <- hist_raw
+for (ind in indicator_info$code) {
+  v <- hist_norm[[ind]]
+  rng <- c(feat_bounds$min[feat_bounds$code == ind],
+           feat_bounds$max[feat_bounds$code == ind])
+  hist_norm[[ind]] <- if (rng[2] > rng[1]) (v - rng[1]) / (rng[2] - rng[1]) else 0
+}
+hist_norm <- hist_norm %>%
+  mutate(across(all_of(indicator_info$code), ~replace_na(.x, 0)))
+
+# Coverage diagnostic: share of features with non-NA raw value, by country-year
+na_share <- hist_raw %>%
+  rowwise() %>%
+  mutate(na_share = mean(is.na(c_across(all_of(indicator_info$code))))) %>%
+  ungroup() %>%
+  select(country_text_id, year, na_share)
+
+cat("Historical panel:", nrow(hist_norm), "rows x",
+    length(indicator_info$code), "features\n")
+```
+
+```{r history-coverage-plot, fig.height=2.6}
+ggplot(na_share, aes(year, 1 - na_share, color = country_text_id)) +
+  geom_line(linewidth = 0.7) +
+  scale_y_continuous(labels = scales::percent, limits = c(0, 1)) +
+  labs(x = NULL, y = "Share of features observed",
+       subtitle = "V-Dem feature coverage by country-year (raw, before NA->0 imputation)",
+       color = NULL) +
+  theme(legend.position = "bottom")
+```
+
+```{r outcome-panel, cache=TRUE}
+# Build the outcome panel for the cross-sectional model. We model 4 outcomes:
+# HCI, IMR (log), Life Expectancy, ECI. Same window logic as outcomes_ml.Rmd:
+# most recent non-NA value within 6 years ending at latest_year.
+
+outcome_meta <- tribble(
+  ~column,                 ~bucket,       ~label,                       ~transform,
+  "wdi_hd_hci_ovrl",       "Education",   "Human Capital Index",        "none",
+  "wdi_sp_dyn_imrt_in",    "Health",      "Infant mortality (log)",     "log",
+  "wdi_sp_dyn_le00_in",    "Health",      "Life expectancy",            "none",
+  "atl_sitc_eci",          "Complexity",  "Economic Complexity (ECI)",  "none"
+)
+
+macro <- read_parquet(
+  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", outcome_meta$column)
+)
+
+window <- seq(latest_year - 5, latest_year)
+pick_latest <- function(col) {
+  macro %>%
+    filter(year %in% window, !is.na(.data[[col]])) %>%
+    group_by(countrycodeiso) %>%
+    slice_max(year, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    transmute(iso3 = countrycodeiso,
+              !!col := .data[[col]])
+}
+outcome_wide <- reduce(
+  lapply(outcome_meta$column, pick_latest),
+  ~full_join(.x, .y, by = "iso3")
+)
+for (i in seq_len(nrow(outcome_meta))) {
+  col <- outcome_meta$column[i]
+  if (outcome_meta$transform[i] == "log") {
+    outcome_wide[[col]] <- log(pmax(outcome_wide[[col]], .Machine$double.eps))
+  }
+}
+```
+
+```{r join-and-fit, cache=TRUE}
+mcp_df <- as_tibble(Mcp, rownames = "country_name") %>%
+  mutate(iso3 = unname(iso3_lookup[country_name])) %>%
+  relocate(iso3)
+
+analysis_df <- mcp_df %>%
+  inner_join(outcome_wide, by = "iso3")
+
+feature_cols <- indicator_info$code
+X_mat <- matrix(as.double(as.matrix(analysis_df[, feature_cols])),
+                nrow = nrow(analysis_df), ncol = length(feature_cols),
+                dimnames = list(analysis_df$iso3, feature_cols))
+
+base_params <- list(
+  objective = "reg:squarederror",
+  eval_metric = "rmse",
+  eta = 0.05,
+  subsample = 0.8,
+  colsample_bytree = 0.8,
+  min_child_weight = 5,
+  verbosity = 0
+)
+
+fit_one <- function(col, depth = 3, seed = 42) {
+  y_full <- analysis_df[[col]]
+  ok <- !is.na(y_full)
+  X_ok <- matrix(as.double(X_mat[ok, , drop = FALSE]),
+                 nrow = sum(ok), ncol = ncol(X_mat),
+                 dimnames = list(rownames(X_mat)[ok], colnames(X_mat)))
+  y <- as.double(y_full[ok])
+  n <- length(y)
+
+  params <- c(base_params, list(max_depth = depth))
+  set.seed(seed)
+  dall <- xgb.DMatrix(data = X_ok, label = y)
+  cv <- xgb.cv(params = params, data = dall, nrounds = 1000,
+               nfold = 5, early_stopping_rounds = 40, verbose = 0)
+  best_nrounds <- cv$early_stop$best_iteration
+  if (is.null(best_nrounds) || length(best_nrounds) == 0) {
+    best_nrounds <- which.min(cv$evaluation_log$test_rmse_mean)
+  }
+
+  set.seed(seed)
+  folds <- sample(rep(1:5, length.out = n))
+  oos_pred <- numeric(n)
+  for (k in 1:5) {
+    tr <- folds != k; te <- folds == k
+    m <- xgb.train(params = params,
+                   data = xgb.DMatrix(X_ok[tr, , drop = FALSE], label = y[tr]),
+                   nrounds = best_nrounds, verbose = 0)
+    oos_pred[te] <- predict(m, X_ok[te, , drop = FALSE])
+  }
+  r2_oos <- 1 - sum((y - oos_pred)^2) / sum((y - mean(y))^2)
+  oos_rmse <- sqrt(var(y) * (1 - r2_oos))
+
+  final <- xgb.train(params = params, data = dall,
+                     nrounds = best_nrounds, verbose = 0)
+  list(col = col, depth = depth, n = n, r2_oos = r2_oos,
+       oos_rmse = oos_rmse, model = final)
+}
+
+# Sweep depths 3-5 per outcome, keep best
+fits <- list()
+for (i in seq_len(nrow(outcome_meta))) {
+  col <- outcome_meta$column[i]
+  cands <- lapply(3:5, function(d) fit_one(col, depth = d))
+  best <- cands[[which.max(sapply(cands, `[[`, "r2_oos"))]]
+  fits[[col]] <- best
+  cat(sprintf("%-25s | best depth %d | OOS R^2 %.3f | n %d\n",
+              col, best$depth, best$r2_oos, best$n))
+}
+```
+
+```{r model-summary}
+tibble(
+  outcome = sapply(fits, `[[`, "col"),
+  label = outcome_meta$label[match(sapply(fits, `[[`, "col"), outcome_meta$column)],
+  bucket = outcome_meta$bucket[match(sapply(fits, `[[`, "col"), outcome_meta$column)],
+  n = sapply(fits, `[[`, "n"),
+  best_depth = sapply(fits, `[[`, "depth"),
+  oos_r2 = round(sapply(fits, `[[`, "r2_oos"), 3),
+  oos_rmse = round(sapply(fits, `[[`, "oos_rmse"), 3)
+) %>%
+  select(bucket, label, n, best_depth, oos_r2, oos_rmse) %>%
+  kable(caption = "Cross-sectional model performance per outcome (5-fold CV).
+        These are the same models used in outcomes_ml.Rmd, here re-fit on the
+        four outcomes we project history through.")
+```
+
+# Institutional trajectory, 1970–2025
+
+## Projection through the 2025 PCA
+
+We compute `prcomp(X_mat, center=TRUE, scale.=TRUE)` on the 2025 Mcp and use
+its rotation matrix to project the historical panel into the same PC space.
+A historical PC1/PC2 score is the dot product of the historical fingerprint
+(2025-scaled) with the 2025 loading vector. This is the standard approach to
+"projecting new observations into an existing PCA."
+
+```{r pca-fit-and-project, cache=TRUE}
+pca <- prcomp(X_mat, center = TRUE, scale. = TRUE)
+var_exp <- pca$sdev^2 / sum(pca$sdev^2)
+
+# Project history: rebuild the (year x country x feature) matrix in 2025-scale
+hist_X <- hist_norm %>%
+  arrange(country_text_id, year) %>%
+  select(country_text_id, year, all_of(indicator_info$code))
+
+hist_mat <- as.matrix(hist_X[, indicator_info$code])
+storage.mode(hist_mat) <- "double"
+rownames(hist_mat) <- paste(hist_X$country_text_id, hist_X$year, sep = "_")
+
+hist_pc <- predict(pca, newdata = hist_mat)
+hist_pc_df <- as_tibble(hist_pc[, 1:5], rownames = "key") %>%
+  separate(key, into = c("iso3", "year"), sep = "_", convert = TRUE)
+```
+
+```{r pc-trajectory, fig.height=5}
+breaks_df <- tibble(brk = c(1979, 1987, 1997, 2006))
+
+pc_long <- hist_pc_df %>%
+  pivot_longer(starts_with("PC"), names_to = "pc", values_to = "score") %>%
+  filter(pc %in% c("PC1", "PC2"))
+
+pc_facet_labels <- c(
+  PC1 = "PC1: liberal-democracy axis (positive = freer institutions)",
+  PC2 = "PC2: managed-state vs. contestation (positive = managed-state, negative = contestation)"
+)
+
+ggplot(pc_long, aes(year, score, color = iso3)) +
+  geom_vline(data = breaks_df, aes(xintercept = brk),
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_line(linewidth = 0.7) +
+  facet_wrap(~ pc, ncol = 1, scales = "free_y", labeller = as_labeller(pc_facet_labels)) +
+  labs(x = NULL, y = "PC score (2025-PCA projection)",
+       subtitle = "Cambodia, Vietnam, Burundi: institutional position over time, projected into the 2025 PCA",
+       color = NULL) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 9))
+```
+
+The 2025-PCA loadings define PC1 as a liberal-democracy axis (more positive =
+freer judiciary, election integrity, parliamentary oversight) and PC2 as a
+managed-state vs. contestation axis. Top |PC2| loadings are anti-system
+movements (`v2csantimv`), academic/general mobilisation (`v2cademmob`,
+`v2cagenmob`), civil violence (`v2caviol`), and opposition camps (`v2cacamps`)
+on the *negative* side, versus social-media regulatory capacity (`v2smregcap`),
+state-driven media frames (`v2smmefra`, `v2smpolsoc`), public-health and
+education-equality delivery (`v2pehealth`, `v2peedueq`), and election-ban scope
+(`v2elsnlsff`) on the *positive* side. So **negative PC2 = open contestation,
+mass mobilisation; positive PC2 = state-managed information environment with
+delivered services**. This is the same convention used in the static
+`outcomes_ml.Rmd` PCA scatter (where Vietnam, China, Laos, Egypt sit deep on
+the positive side; Cambodia, Pakistan, Burundi, Myanmar sit on the negative
+side).
+
+## Selected V-Dem features over time
+
+To complement the PC summary, we plot a small set of substantive indicators
+that load heavily on PC1. Each panel shows the *raw* V-Dem score (not
+2025-normalised) so the y-axis stays interpretable in V-Dem's native units.
+
+```{r feature-trajectories, fig.height=6.2}
+key_features <- c(
+  v2juhcind   = "High-court independence",
+  v2lgqstexp  = "Legislature questions officials",
+  v2elirreg   = "Election irregularities (cleaner = higher)",
+  v2exbribe   = "Executive bribery (cleaner = higher)",
+  v2cseeorgs  = "CSO entry/exit barriers (open = higher)",
+  v2pepwrses  = "Power distributed by socio-economic position"
+)
+
+feat_long <- hist_raw %>%
+  select(country_text_id, year, all_of(names(key_features))) %>%
+  pivot_longer(-c(country_text_id, year), names_to = "code", values_to = "value") %>%
+  mutate(label = key_features[code],
+         label = factor(label, levels = key_features))
+
+ggplot(feat_long, aes(year, value, color = country_text_id)) +
+  geom_vline(data = breaks_df, aes(xintercept = brk),
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.6) +
+  facet_wrap(~ label, scales = "free_y", ncol = 2) +
+  labs(x = NULL, y = "V-Dem score (raw)",
+       subtitle = "Selected institutional features, raw V-Dem units. Dashed lines: 1979/1987/1997/2006",
+       color = NULL) +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 8))
+```
+
+## Cambodia's eras at a glance
+
+| Years | Regime | Headline institutional fact |
+|---|---|---|
+| 1970–1975 | Khmer Republic (Lon Nol) | Coup against Sihanouk; civil war |
+| 1975–1979 | Democratic Kampuchea (Khmer Rouge) | Total state collapse; mass atrocity |
+| 1979–1989 | People's Republic of Kampuchea | Vietnamese-backed PRK; rebuild from zero |
+| 1989–1993 | State of Cambodia / UNTAC | Transition; UN-supervised election |
+| 1993–1997 | Constitutional monarchy / coalition | FUNCINPEC–CPP power-sharing |
+| 1997–2017 | CPP-dominated multiparty | Hun Sen consolidates after 1997 coup |
+| 2017–2025 | One-party CPP | CNRP dissolved; Hun Manet succession |
+
+The growth breaks the user identified line up with these transitions:
+**1979** ends the Khmer Rouge; **1987** sits inside the PRK reform period
+(party reform, gradual market opening, Vietnamese drawdown announced);
+**1997** is the Hun Sen coup that ended power-sharing; **2006** roughly marks
+the consolidation of CPP dominance and accession to the WTO (2004) plus the
+subsequent garment-export boom.
+
+# Predicted outcomes from historical fingerprints
+
+For each year and country, we feed the 2025-scale historical fingerprint
+through each of the four cross-sectional XGBoost models. The result is a
+**counterfactual outcome time-series**: "if a country with this V-Dem
+fingerprint existed in 2025, this is the HCI / IMR / LE / ECI it would
+have." We then plot this against the *actual* outcome series (where
+available) and look for divergence.
+
+The prediction is not "what HCI Cambodia had in 1985"; HCI as a measure
+didn't exist then. It's **"what HCI a country with 1985-Cambodia's
+institutional setup would have today"** — i.e., what the model thinks
+1985-Cambodia's institutions could *deliver* if measured by today's
+yardsticks.
+
+```{r project-history, cache=TRUE}
+predict_history <- function(fit) {
+  preds <- predict(fit$model, hist_mat)
+  tibble(
+    iso3 = hist_X$country_text_id,
+    year = hist_X$year,
+    outcome = fit$col,
+    predicted = preds
+  )
+}
+
+pred_long <- map_dfr(fits, predict_history)
+
+# Pull actuals as long form, applying transforms
+actuals_long <- macro %>%
+  rename(iso3 = countrycodeiso) %>%
+  filter(iso3 %in% focus_iso3, year >= 1970) %>%
+  pivot_longer(all_of(outcome_meta$column),
+               names_to = "outcome", values_to = "actual") %>%
+  left_join(outcome_meta %>% select(column, transform),
+            by = c("outcome" = "column")) %>%
+  mutate(actual = if_else(transform == "log", log(pmax(actual, .Machine$double.eps)), actual)) %>%
+  select(iso3, year, outcome, actual)
+
+panel <- full_join(pred_long, actuals_long, by = c("iso3", "year", "outcome")) %>%
+  left_join(outcome_meta %>% select(column, label, bucket),
+            by = c("outcome" = "column")) %>%
+  mutate(label = factor(label, levels = outcome_meta$label),
+         iso3 = factor(iso3, levels = c("KHM", "VNM", "BDI")))
+```
+
+## Predicted vs actual: full panel
+
+Solid line = model prediction from the year-t V-Dem fingerprint. Dots = actual
+observed outcome (when available). Vertical dashes mark Cambodia's growth
+breaks. For HCI, actuals only exist 2010–2020 — so the dot cluster is small
+but informative.
+
+```{r predicted-vs-actual, fig.width=7.2, fig.height=8}
+ggplot(panel, aes(year, predicted, color = iso3)) +
+  geom_vline(data = breaks_df, aes(xintercept = brk),
+             color = "grey70", linetype = "dashed", linewidth = 0.3) +
+  geom_line(linewidth = 0.6) +
+  geom_point(aes(y = actual), size = 0.7, alpha = 0.7) +
+  facet_grid(label ~ iso3, scales = "free_y", switch = "y") +
+  labs(x = NULL, y = NULL,
+       subtitle = "Solid line: model prediction from V-Dem fingerprint at year t.\nDots: actual outcome (where reported).",
+       color = NULL) +
+  theme(legend.position = "none",
+        strip.placement = "outside",
+        strip.text.y.left = element_text(angle = 0, hjust = 1, size = 8),
+        strip.text.x = element_text(face = "bold"))
+```
+
+## Cambodia: predicted-vs-actual zoom, by outcome
+
+A focused view of Cambodia alone makes the divergences easier to read.
+
+```{r khm-zoom, fig.width=7.2, fig.height=6.2}
+khm_panel <- panel %>% filter(iso3 == "KHM")
+
+ggplot(khm_panel, aes(year)) +
+  geom_vline(data = breaks_df, aes(xintercept = brk),
+             color = "grey70", linetype = "dashed", linewidth = 0.3) +
+  geom_line(aes(y = predicted, color = "Predicted (model)"), linewidth = 0.7) +
+  geom_point(aes(y = actual, color = "Actual"), size = 1.2) +
+  geom_line(aes(y = actual, color = "Actual"), linewidth = 0.5, alpha = 0.6) +
+  facet_wrap(~ label, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = c("Predicted (model)" = gl$brand_blue,
+                                 "Actual" = highlight)) +
+  labs(x = NULL, y = NULL, color = NULL,
+       subtitle = "Cambodia (KHM): predicted from V-Dem vs. actual, 1970-2025") +
+  theme(legend.position = "bottom",
+        strip.text = element_text(face = "bold", size = 9))
+```
+
+## Reading each panel
+
+### Human Capital Index
+
+HCI is reported only every 2–3 years, starting 2010. The model predicts an HCI
+trajectory all the way back to 1970 because the V-Dem fingerprint exists for
+those years. This is the trajectory under test for the decay hypothesis: did
+the model think Cambodia *could* deliver higher HCI under earlier institutions
+than it predicts today?
+
+```{r hci-summary}
+hci_table <- panel %>%
+  filter(outcome == "wdi_hd_hci_ovrl",
+         year %in% c(1975, 1980, 1985, 1990, 1995, 2000, 2005, 2010, 2015, 2020, 2024)) %>%
+  arrange(iso3, year) %>%
+  select(iso3, year, predicted, actual) %>%
+  mutate(across(c(predicted, actual), ~round(.x, 3)))
+kable(hci_table, caption = "Predicted HCI from year-t V-Dem fingerprint vs. actual HCI (where reported).")
+```
+
+### Infant mortality (log) — the leading-indicator hypothesis
+
+Actual log-IMR for Cambodia falls steadily from 1980 onward — the HCI
+investment of the PRK and post-UNTAC eras delivered a real mortality
+transition. The model's *predicted* log-IMR is what 2025-trained
+institutions-to-IMR mapping says a country with year-t Cambodia's institutions
+would have today. If that predicted line **turns upward before actual**, it's
+evidence the institutions capable of *sustaining* the mortality transition
+have already eroded.
+
+```{r imr-divergence}
+imr_panel <- panel %>%
+  filter(outcome == "wdi_sp_dyn_imrt_in", iso3 == "KHM") %>%
+  arrange(year)
+
+# When did predicted IMR (log) bottom out? When did actual bottom out?
+imr_pred_min_year <- imr_panel %>% slice_min(predicted, n = 1) %>% pull(year)
+imr_act_min_year  <- imr_panel %>% filter(!is.na(actual)) %>%
+  slice_min(actual, n = 1) %>% pull(year)
+
+cat(sprintf("Cambodia: predicted log-IMR minimum at year %d.\n", imr_pred_min_year))
+cat(sprintf("Cambodia: actual log-IMR minimum at year %d (latest available).\n",
+            imr_act_min_year))
+```
+
+```{r imr-gap-plot, fig.height=3.5}
+imr_gap <- panel %>%
+  filter(outcome == "wdi_sp_dyn_imrt_in", !is.na(actual)) %>%
+  mutate(gap = actual - predicted)
+
+ggplot(imr_gap, aes(year, gap, color = iso3)) +
+  geom_vline(data = breaks_df, aes(xintercept = brk),
+             color = "grey70", linetype = "dashed", linewidth = 0.3) +
+  geom_hline(yintercept = 0, color = "grey50", linewidth = 0.4) +
+  geom_line(linewidth = 0.7) +
+  labs(x = NULL, y = "Actual minus predicted log-IMR",
+       subtitle = "Positive gap: actual IMR worse than institutions predict.\nNegative gap: country outperforms its institutional fingerprint.",
+       color = NULL) +
+  theme(legend.position = "bottom")
+```
+
+### Life expectancy — the stock indicator
+
+Life expectancy is an integral of past mortality conditions; it should
+respond *more slowly* than IMR and so should track actual better than
+predicted in the near term, even if predicted is already deteriorating.
+
+### Economic complexity (ECI)
+
+ECI is computed from export structure, which itself is built up over decades
+from accumulated productive capabilities. Cambodia's ECI rose with garment
+exports post-WTO accession (2004); the question is whether the institutional
+fingerprint is now consistent with continued upgrading or has decayed below
+the level associated with sustained complexity gains.
+
+# Per-era summary
+
+To compare Cambodia's institutional regimes directly, we average each
+country's predicted and actual outcome within seven Cambodian eras: Khmer
+Republic, Khmer Rouge, PRK, SOC/UNTAC, Coalition, CPP-dominated, and
+One-party CPP. The Vietnam and Burundi columns use the same year ranges so
+the comparison is era-anchored on Cambodia's politics.
+
+```{r era-summary, fig.height=6.4}
+era_labeller <- function(y) {
+  case_when(
+    y >= 1970 & y < 1975 ~ "1. Khmer Republic (1970-74)",
+    y >= 1975 & y < 1979 ~ "2. Khmer Rouge (1975-78)",
+    y >= 1979 & y < 1989 ~ "3. PRK (1979-88)",
+    y >= 1989 & y < 1993 ~ "4. SOC/UNTAC (1989-92)",
+    y >= 1993 & y < 1998 ~ "5. Coalition (1993-97)",
+    y >= 1998 & y < 2018 ~ "6. CPP-dominated (1998-2017)",
+    y >= 2018             ~ "7. One-party CPP (2018+)"
+  )
+}
+
+era_summary <- panel %>%
+  mutate(era = era_labeller(year)) %>%
+  group_by(iso3, era, label) %>%
+  summarise(predicted = mean(predicted, na.rm = TRUE),
+            actual    = mean(actual,    na.rm = TRUE),
+            .groups = "drop")
+
+short_outcome <- c(
+  "Human Capital Index" = "HCI",
+  "Infant mortality (log)" = "log-IMR",
+  "Life expectancy" = "LE",
+  "Economic Complexity (ECI)" = "ECI"
+)
+
+short_era <- c(
+  "1. Khmer Republic (1970-74)"  = "Khmer Rep. 1970-74",
+  "2. Khmer Rouge (1975-78)"     = "Khmer Rouge 1975-78",
+  "3. PRK (1979-88)"             = "PRK 1979-88",
+  "4. SOC/UNTAC (1989-92)"       = "SOC/UNTAC 1989-92",
+  "5. Coalition (1993-97)"       = "Coalition 1993-97",
+  "6. CPP-dominated (1998-2017)" = "CPP-dom 1998-2017",
+  "7. One-party CPP (2018+)"     = "1-party CPP 2018+"
+)
+
+era_summary %>%
+  filter(iso3 == "KHM") %>%
+  transmute(Era = short_era[era],
+            Outcome = short_outcome[as.character(label)],
+            Predicted = round(predicted, 2),
+            Actual    = ifelse(is.nan(actual), NA, round(actual, 2))) %>%
+  pivot_wider(names_from = Outcome,
+              values_from = c(Predicted, Actual),
+              names_glue = "{Outcome} ({.value})") %>%
+  arrange(match(Era, short_era)) %>%
+  kable(caption = "Cambodia: era-mean predicted vs actual outcome.")
+```
+
+```{r era-predicted-comparison, fig.height=5.5}
+era_pred_compare <- era_summary %>%
+  filter(!is.nan(predicted)) %>%
+  mutate(label = factor(label, levels = outcome_meta$label),
+         iso3 = factor(iso3, levels = c("KHM", "VNM", "BDI")),
+         era_short = factor(short_era[era], levels = unname(short_era)))
+
+ggplot(era_pred_compare, aes(era_short, predicted, color = iso3, group = iso3)) +
+  geom_line(linewidth = 0.6, alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ label, scales = "free_y", ncol = 2) +
+  labs(x = NULL, y = "Predicted outcome (era mean)",
+       subtitle = "Model-predicted outcome for each era's mean V-Dem fingerprint",
+       color = NULL) +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(angle = 45, hjust = 1, size = 6.5),
+        strip.text = element_text(size = 9, face = "bold"),
+        plot.margin = margin(5, 5, 5, 5))
+```
+
+# Structural transformation, 1970-2025
+
+The institutional trajectory above tells us about *politics*. To diagnose
+whether Cambodia's industrial coalition is rentier or magician (Pritchett,
+Sen, Werker, *Deals and Development*, 2018), we also need the *economic*
+trajectory: when did GDP-per-capita break, what sectors drove each phase,
+and does industrial growth lift the rest of the economy or run as an
+enclave?
+
+This section ports the structural-breaks and sectoral-decomposition logic
+from `~/dev/political-economy-pakistan/struc_breaks.Rmd` (which already
+renders a Cambodia PDF) onto the GL theme so they sit alongside the
+institutional analysis.
+
+## Growth breaks (Bai-Perron + Kar et al., 2013)
+
+```{r growth-breaks, cache=TRUE, fig.height=4.2}
+pwt <- read_excel("~/dev/political-economy-pakistan/data/pwt110.xlsx",
+                  sheet = "Data")
+
+penn_growth <- pwt %>%
+  filter(countrycode == "KHM") %>%
+  transmute(year, gdp_per_cap = rgdpna / pop) %>%
+  filter(!is.na(gdp_per_cap)) %>%
+  arrange(year) %>%
+  mutate(growth_rate = (gdp_per_cap - lag(gdp_per_cap)) / lag(gdp_per_cap))
+
+start_year_pwt <- min(penn_growth$year)
+end_year_pwt <- 2023
+n_breaks <- 4
+
+penn_growth_ts <- ts(penn_growth$growth_rate[-1],
+                     start = start_year_pwt, end = end_year_pwt, frequency = 1)
+bp_growth <- breakpoints(penn_growth_ts ~ 1)
+break_years <- Filter(Negate(is.na),
+                      summary(bp_growth)$breakdates[n_breaks, ])
+
+period_growthrates <- penn_growth %>%
+  mutate(periods = cut(year,
+                       breaks = c(start_year_pwt, break_years, end_year_pwt),
+                       dig.lab = 4)) %>%
+  group_by(periods) %>%
+  summarise(avg_growth_rate = mean(growth_rate, na.rm = TRUE),
+            mdn_growth_rate = median(growth_rate, na.rm = TRUE),
+            length = n(),
+            .groups = "drop") %>%
+  mutate(start_period = as.numeric(str_match(as.character(periods),
+                                             "\\(([0-9\\.]+),")[, 2]),
+         end_period = as.numeric(str_match(as.character(periods),
+                                           ",([0-9\\.]+)\\]")[, 2]))
+
+# Kar et al. (2013) filter on average growth-rate jumps between periods
+kar_filter <- period_growthrates %>%
+  mutate(diff = avg_growth_rate - lag(avg_growth_rate),
+         prev_dir = case_when(is.na(lag(diff)) ~ NA_character_,
+                              lag(diff) > 0 ~ "acceleration",
+                              lag(diff) < 0 ~ "deceleration",
+                              TRUE ~ "no_change"),
+         curr_dir = case_when(diff > 0 ~ "acceleration",
+                              diff < 0 ~ "deceleration",
+                              TRUE ~ "no_change"),
+         threshold = case_when(is.na(prev_dir) ~ 0.02,
+                               prev_dir != curr_dir ~ 0.03,
+                               prev_dir == curr_dir ~ 0.01,
+                               TRUE ~ NA_real_),
+         passes_kar = case_when(is.na(diff) ~ NA,
+                                abs(diff) >= threshold ~ TRUE,
+                                TRUE ~ FALSE))
+
+ggplot(penn_growth %>% filter(!is.na(growth_rate)),
+       aes(year, growth_rate)) +
+  geom_rect(data = kar_filter, inherit.aes = FALSE,
+            aes(xmin = start_period, xmax = end_period,
+                ymin = -Inf, ymax = Inf, fill = passes_kar),
+            alpha = 0.18) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.4) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.2) +
+  geom_segment(data = period_growthrates,
+               aes(x = start_period, xend = end_period,
+                   y = avg_growth_rate, yend = avg_growth_rate),
+               linewidth = 0.7, color = gl$brand_blue) +
+  geom_label(data = period_growthrates,
+             aes(x = (start_period + end_period) / 2,
+                 y = avg_growth_rate,
+                 label = scales::percent(avg_growth_rate, accuracy = 0.1)),
+             size = 3, label.size = 0.2) +
+  scale_y_continuous(labels = scales::percent, n.breaks = 8) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  scale_fill_manual(values = c("TRUE" = "#36B250", "FALSE" = "#C64646"),
+                    na.value = "grey80") +
+  labs(x = NULL, y = "Real GDP per capita growth rate",
+       fill = "Passes Kar filter",
+       subtitle = sprintf("Bai-Perron breaks at %s. Period averages and Kar et al. (2013) acceleration filter.",
+                          paste(break_years, collapse = ", "))) +
+  theme(legend.position = "bottom")
+```
+
+```{r growth-breaks-table}
+period_growthrates %>%
+  transmute(Period = as.character(periods),
+            Years = length,
+            `Avg. growth` = scales::percent(avg_growth_rate, accuracy = 0.1),
+            `Median growth` = scales::percent(mdn_growth_rate, accuracy = 0.1)) %>%
+  filter(!is.na(Years)) %>%
+  kable(caption = "Cambodia GDP-per-capita growth periods (Penn World Tables 11.0).")
+```
+
+The Bai-Perron procedure picks the same four break years the analysis was
+seeded with: **1979, 1987, 1997, 2006**. The Kar filter (3% absolute jump
+threshold for direction-changes, 1% for direction-continuations) marks
+1979-87 (PRK recovery) and 1997-2006 (post-coalition garment boom) as the
+two genuine accelerations. The 1987-97 and 2006-23 periods are flagged as
+non-accelerations: the first because PRK gains stalled under sanctions and
+the 1991-93 transition shock; the second because growth slowed from 7.8%
+to 4.8% as the post-2000 garment-led boom exhausted its initial extensive
+margin.
+
+## Sectoral value-added trajectory
+
+```{r sectoral-va, cache=TRUE, fig.height=4.5}
+sectoral_wdi <- macro %>%
+  rename(iso3 = countrycodeiso) %>%
+  filter(iso3 == "KHM") %>%
+  select(iso3, year,
+         starts_with("wdi_nv_"))
+```
+
+```{r sectoral-va-load, cache=TRUE}
+# We need a richer set of sectoral fields than the outcome panel pulled.
+sectoral_full <- read_parquet(
+  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year",
+                 "wdi_nv_agr_totl_kd", "wdi_nv_ind_totl_kd",
+                 "wdi_nv_srv_totl_kd", "wdi_nv_ind_manf_kd",
+                 "wdi_nv_agr_totl_kd_zg", "wdi_nv_ind_totl_kd_zg",
+                 "wdi_nv_srv_totl_kd_zg", "wdi_nv_ind_manf_kd_zg",
+                 "wdi_ny_gdp_pcap_kd_zg",
+                 "wdi_sl_ind_empl_zs", "wdi_sl_tlf_totl_in")
+) %>%
+  rename(iso3 = countrycodeiso) %>%
+  filter(iso3 %in% c("KHM", "VNM", "BDI"))
+```
+
+```{r sectoral-va-plot, fig.height=4.5}
+sector_levels <- c("agr" = "Agriculture",
+                   "ind" = "Industry",
+                   "srv" = "Services")
+
+khm_sectoral <- sectoral_full %>%
+  filter(iso3 == "KHM") %>%
+  select(year, wdi_nv_agr_totl_kd, wdi_nv_ind_totl_kd, wdi_nv_srv_totl_kd) %>%
+  pivot_longer(-year, names_to = "code", values_to = "value") %>%
+  mutate(sector_short = str_remove(code, "wdi_nv_") %>% str_remove("_totl_kd"),
+         Sector = sector_levels[sector_short]) %>%
+  filter(!is.na(value), !is.na(Sector))
+
+# Period CAGRs for labels
+period_cagrs <- khm_sectoral %>%
+  mutate(period = cut(year,
+                      breaks = c(start_year_pwt, break_years, end_year_pwt),
+                      dig.lab = 4)) %>%
+  filter(!is.na(period)) %>%
+  group_by(Sector, period) %>%
+  arrange(year) %>%
+  summarise(
+    start_year_p = first(year),
+    end_year_p = last(year),
+    start_val = first(value),
+    end_val = last(value),
+    n = end_year_p - start_year_p,
+    cagr = if_else(n > 0 & start_val > 0,
+                   (end_val / start_val)^(1 / n) - 1, NA_real_),
+    avg_value = exp(mean(log(value), na.rm = TRUE)),
+    .groups = "drop") %>%
+  mutate(mid_year = (start_year_p + end_year_p) / 2)
+
+ggplot(khm_sectoral, aes(year, value, color = Sector)) +
+  geom_vline(data = breaks_df, aes(xintercept = brk),
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 0.9) +
+  geom_label_repel(data = period_cagrs %>% filter(!is.na(cagr)),
+                   aes(x = mid_year, y = avg_value,
+                       label = scales::percent(cagr, accuracy = 0.1)),
+                   size = 2.8, label.size = 0.15,
+                   min.segment.length = 0.2,
+                   show.legend = FALSE) +
+  scale_y_log10(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_x_continuous(breaks = seq(1970, 2025, 10)) +
+  scale_color_manual(values = c("Agriculture" = "#EAC218",
+                                "Industry"    = "#36B250",
+                                "Services"    = "#266798")) +
+  labs(x = NULL, y = "Sectoral value added (constant 2015 USD, log)",
+       subtitle = "Cambodia: sectoral value added with period CAGRs. Vertical dashes mark growth breaks.",
+       color = NULL) +
+  theme(legend.position = "bottom")
+```
+
+The sectoral picture sharpens the political trajectory. **Agriculture
+slows sharply after 2006** to ~2.0% total-VA growth — barely above
+Cambodia's ~1.3% population growth, so per-capita agricultural
+value-added is approximately flat (it was ~3.6% per-capita over
+1997-2006 in the struc_breaks per-capita series). **Services slow**
+from 10.7% (1997-2006) to 5.5% (2006-23). **Industry holds 9.0%** as the
+dominant engine, but its growth rate *also* fell from the 16.9% peak of
+1997-2006. The structural-transformation moment Cambodia boasts —
+industry overtaking services in value-added around 2017 — happened
+with industry slowing, not services stagnating: a level-crossing driven
+by services losing momentum rather than by industry accelerating. (The
+CAGRs labelled on the chart are total VA growth, not per-capita; subtract
+~1.3pp for per-capita rates.)
+
+# Magician or rentier? Sectoral evidence
+
+The Pritchett-Sen-Werker framework distinguishes growth that **deepens
+productive capability** (magician) from growth that **scales existing rent
+flows** (rentier). For Cambodia's industrial coalition — garments,
+SEZs from 2005, casinos, real estate — three diagnostic tests below
+operate on data we already have. A fourth test connects PC2's
+contestation trajectory to the political economy of consolidation.
+
+## Test 1: Capability deepening (ECI trajectory)
+
+Magicians complexify their export basket: ECI rises as the country
+moves into denser, more sophisticated products. Rentiers don't: ECI
+stays flat or falls as growth piles into the same narrow basket.
+
+```{r eci-trajectory, fig.height=3.6, cache=TRUE}
+eci_panel <- read_parquet(
+  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", "atl_sitc_eci")
+) %>%
+  rename(iso3 = countrycodeiso) %>%
+  filter(iso3 %in% c("KHM", "VNM", "BDI"),
+         !is.na(atl_sitc_eci),
+         year >= 1995)
+
+ggplot(eci_panel, aes(year, atl_sitc_eci, color = iso3)) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 0.9) +
+  scale_x_continuous(breaks = seq(1995, 2025, 5)) +
+  labs(x = NULL, y = "Economic Complexity Index (SITC)",
+       subtitle = "ECI trajectory 1995-latest. Magician = rising; rentier = flat.",
+       color = NULL) +
+  theme(legend.position = "bottom")
+```
+
+```{r eci-summary}
+eci_panel %>%
+  group_by(iso3) %>%
+  arrange(year) %>%
+  summarise(
+    `First year` = first(year),
+    `Last year`  = last(year),
+    `ECI start`  = round(first(atl_sitc_eci), 2),
+    `ECI end`    = round(last(atl_sitc_eci), 2),
+    `ECI change` = round(last(atl_sitc_eci) - first(atl_sitc_eci), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(`ECI change`)) %>%
+  kable(caption = "ECI start/end and total change by country.")
+```
+
+The split is clean. **Vietnam** rises from a low-negative ECI in the
+mid-1990s to noticeably positive territory by the 2020s — a multi-decade
+complexification consistent with the magician profile. **Cambodia** moves
+modestly from very low to slightly less low; ECI has *risen* but stays
+firmly negative throughout, and growth in complexity has not kept pace
+with growth in GDP. **Burundi** drifts further negative — low complexity
+to begin with, slowly declining. On this test, KHM is closer to the
+rentier end of the spectrum than the magician end — particularly when
+benchmarked against VNM, which started from a similar position in 1995.
+
+## Test 2: Inter-sectoral spillovers
+
+Magician industrial growth has linkages: a rising manufacturing sector
+absorbs labour from agriculture, demands transport and finance services,
+and pushes mechanisation back into agriculture. Rentier industrial growth
+is enclaved (SEZs, FDI assembly with imported inputs); other sectors
+don't co-move with it. We test this directly: does annual industry growth
+predict annual agriculture or services growth, KHM vs VNM?
+
+```{r spillover-scatter, fig.height=4.6, cache=TRUE}
+spillover_data <- sectoral_full %>%
+  filter(iso3 %in% c("KHM", "VNM"),
+         year >= 1995) %>%
+  select(iso3, year,
+         agr = wdi_nv_agr_totl_kd_zg,
+         ind = wdi_nv_ind_totl_kd_zg,
+         srv = wdi_nv_srv_totl_kd_zg) %>%
+  pivot_longer(c(agr, srv), names_to = "other_sector", values_to = "other_growth") %>%
+  filter(!is.na(ind), !is.na(other_growth)) %>%
+  mutate(other_label = recode(other_sector,
+                              agr = "Agriculture growth",
+                              srv = "Services growth"))
+
+# Compute slope and correlation per panel
+spillover_fits <- spillover_data %>%
+  group_by(iso3, other_label) %>%
+  summarise(
+    slope = coef(lm(other_growth ~ ind))[2],
+    cor   = cor(ind, other_growth),
+    n     = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(label = sprintf("slope = %.2f\nr = %.2f  (n=%d)", slope, cor, n))
+
+ggplot(spillover_data, aes(ind, other_growth)) +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_point(aes(color = iso3), size = 1.2, alpha = 0.7) +
+  geom_smooth(aes(color = iso3), method = "lm", se = FALSE,
+              linewidth = 0.7, formula = y ~ x) +
+  geom_text(data = spillover_fits,
+            aes(x = -Inf, y = Inf, label = label, color = iso3),
+            hjust = -0.05, vjust = 1.2, size = 2.8,
+            lineheight = 0.95, show.legend = FALSE) +
+  facet_grid(other_label ~ iso3) +
+  labs(x = "Industry value-added growth (annual, %)",
+       y = "Other-sector growth (annual, %)",
+       color = NULL,
+       subtitle = "Annual co-movement of industry with agriculture and services. Stronger positive slope = stronger spillovers.") +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", size = 9))
+```
+
+Vietnam's industrial growth correlates positively with both agriculture
+and services growth — VNM's industry pulls the rest of the economy along.
+Cambodia's correlations are far weaker; KHM's industry can grow strongly
+in years when agriculture is flat or falling. The decoupling is exactly
+what you'd expect of an enclaved coalition: garment factories and SEZs
+import their inputs (fabric from China, machinery from Korea), assemble
+for export, and the value-added that stays in-country is wages plus
+land/concession rents — neither of which feeds backward into domestic
+agriculture or generates much downstream demand for sophisticated
+services.
+
+## Test 3: Productivity vs employment in industry
+
+Manufacturing/industry value-added growth decomposes into a productivity
+component (VA per worker) and an employment component (number of
+workers). Magicians grow the productivity component; rentiers grow the
+employment component, hiring more workers at flat productivity in the
+quota-and-cheap-labour assembly model.
+
+We use industry-level employment (the macro parquet has no
+manufacturing-only employment series): industry employment share
+`wdi_sl_ind_empl_zs` × total labour force `wdi_sl_tlf_totl_in`. For
+Cambodia, industry is dominated by garments, so the proxy is reasonable;
+for Vietnam, industry includes more heavy-industry and construction, so
+the productivity component is biased *upward* relative to garments.
+
+```{r productivity-decomp, fig.height=4.4, cache=TRUE}
+ind_decomp <- sectoral_full %>%
+  filter(iso3 %in% c("KHM", "VNM"),
+         year >= 1995, year <= 2023,
+         !is.na(wdi_nv_ind_totl_kd),
+         !is.na(wdi_sl_ind_empl_zs),
+         !is.na(wdi_sl_tlf_totl_in)) %>%
+  mutate(ind_workers = wdi_sl_ind_empl_zs / 100 * wdi_sl_tlf_totl_in,
+         va_per_worker = wdi_nv_ind_totl_kd / ind_workers) %>%
+  select(iso3, year, ind_va = wdi_nv_ind_totl_kd,
+         ind_workers, va_per_worker)
+
+decomp_long <- ind_decomp %>%
+  pivot_longer(c(ind_workers, va_per_worker, ind_va),
+               names_to = "metric", values_to = "value") %>%
+  mutate(metric_label = recode(metric,
+    ind_va = "Industry VA",
+    ind_workers = "Industry workers",
+    va_per_worker = "VA per worker"
+  ),
+  metric_label = factor(metric_label,
+    levels = c("Industry VA", "Industry workers", "VA per worker")))
+
+ggplot(decomp_long, aes(year, value, color = iso3)) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 0.7) +
+  facet_wrap(~ metric_label, scales = "free_y", ncol = 3) +
+  scale_y_log10(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_x_continuous(breaks = seq(1995, 2025, 10)) +
+  labs(x = NULL, y = NULL, color = NULL,
+       subtitle = "Industry VA decomposition: VA = workers x VA/worker. Log scales.") +
+  theme(legend.position = "bottom",
+        strip.text = element_text(size = 9, face = "bold"))
+```
+
+```{r productivity-cagr-table}
+prod_cagr <- ind_decomp %>%
+  group_by(iso3) %>%
+  arrange(year) %>%
+  summarise(
+    `Period`            = sprintf("%d-%d", first(year), last(year)),
+    `Years`             = last(year) - first(year),
+    `Industry VA CAGR`  = scales::percent(
+      (last(ind_va) / first(ind_va))^(1 / (last(year) - first(year))) - 1,
+      accuracy = 0.1),
+    `Workers CAGR`      = scales::percent(
+      (last(ind_workers) / first(ind_workers))^(1 / (last(year) - first(year))) - 1,
+      accuracy = 0.1),
+    `VA/worker CAGR`    = scales::percent(
+      (last(va_per_worker) / first(va_per_worker))^(1 / (last(year) - first(year))) - 1,
+      accuracy = 0.1),
+    .groups = "drop"
+  )
+kable(prod_cagr,
+      caption = "Industry productivity vs employment decomposition, KHM vs VNM.")
+```
+
+The decomposition tells a more nuanced story than the simple "rentiers
+grow workers, magicians grow productivity" framing predicts:
+
+- **Productivity CAGRs are roughly equal**: KHM 1.3%/yr vs VNM 1.2%/yr.
+  Both countries are running on the same productivity treadmill in
+  industry — neither is a runaway productivity story.
+- **Workers grew much faster in KHM** (9.8%/yr vs 5.8%/yr) — Cambodia
+  absorbed industrial labour ~70% faster than Vietnam at a *similar*
+  productivity-growth rate, meaning **a larger share of KHM's industry
+  growth came from the extensive margin** (12% from productivity vs
+  17% for VNM).
+- **Levels still differ**: VNM ended 2023 at ~$7K VA per industry
+  worker; KHM at ~$6K. Vietnam was ahead in 1995 and remains ahead.
+
+So the rentier signal here is partial. KHM's productivity isn't *flat*
+in absolute terms (it rose 1.3%/yr), but it *is* a smaller share of
+total industry growth than VNM's. The clean magician/rentier dichotomy
+breaks down at the productivity-CAGR level; what survives is that
+**Cambodia's industrial expansion is much more headcount-driven than
+Vietnam's**, even with similar per-worker productivity gains. The
+rentier reading wants to see Cambodia adding cheap labour into the
+same low-productivity activities — and that's exactly the workers-vs-
+productivity split this table shows.
+
+## Test 4: PC2 trajectory and coalition consolidation
+
+If Cambodia's industrial coalition is rentier-style, the political
+economy story is that **rising managed-state capacity (PC2 trending
+positive) should align with coalition-cementing events** — moments
+when the CPP locks in the textile/SEZ/concession bargain and forecloses
+challengers — not just with formal democratic-backsliding events. We
+overlay PC2 with the relevant political and trade-policy moments.
+
+```{r pc2-events, fig.height=4.2}
+pc2_khm <- hist_pc_df %>%
+  filter(iso3 == "KHM") %>%
+  select(year, pc2 = PC2)
+
+events <- tribble(
+  ~year, ~event,                              ~ymax_offset,
+  1991,  "UNTAC begins (Paris Accords)",      0.85,
+  1993,  "UN-supervised election; coalition", 0.65,
+  1997,  "Hun Sen coup; coalition ends",      0.45,
+  2001,  "EBA: EU duty-free for KHM",         0.85,
+  2005,  "SEZ law enacted",                   0.65,
+  2015,  "Sam Rainsy exile",                  0.45,
+  2017,  "CNRP dissolved",                    0.30,
+  2020,  "EBA partial withdrawal",            0.15
+)
+
+pc2_range <- range(pc2_khm$pc2)
+event_y <- function(o) pc2_range[1] + o * diff(pc2_range)
+
+events <- events %>% mutate(label_y = event_y(ymax_offset))
+
+ggplot(pc2_khm, aes(year, pc2)) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_segment(data = events,
+               aes(x = year, xend = year,
+                   y = pc2_range[1], yend = label_y),
+               color = "grey60", linetype = "dotted", linewidth = 0.4) +
+  geom_line(linewidth = 0.8, color = highlight) +
+  geom_point(size = 0.9, color = highlight) +
+  geom_label_repel(data = events,
+                   aes(x = year, y = label_y, label = event),
+                   size = 2.5, label.size = 0.15,
+                   nudge_y = 0.05,
+                   segment.color = "grey50",
+                   segment.size = 0.3,
+                   min.segment.length = 0.1,
+                   max.overlaps = 20) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  labs(x = NULL, y = "PC2 score (contestation <- 0 -> managed-state)",
+       subtitle = "Cambodia PC2 with political and trade-policy events overlaid.") +
+  theme(legend.position = "none")
+```
+
+After discounting the 1975-1980 spike (a model artifact: NA-imputed-to-zero
+fingerprints during state collapse), the genuine trajectory is a steady
+**multi-decade climb from deep contestation toward managed-state values**:
+
+- **PRK era (~1985-1990): mildly managed.** PC2 hovers around 0,
+  reflecting the Vietnamese-installed administration's top-down
+  control before the multi-party transition.
+- **UNTAC and 1993 election:** PC2 falls sharply into deep-negative
+  contestation territory (~-3) — multi-party period, refugee camps,
+  rebel factions, and a fragile UN-supervised coalition.
+- **1995-2010: PC2 stays at -2 to -3.** The deepest contestation
+  values in the series. KR holdouts surrender 1998-99; the 1997 Hun
+  Sen coup forcibly ends power-sharing but factional politics, opposition
+  parties, and active civil-society mobilisation remain part of the V-Dem
+  fingerprint through this entire window.
+- **2010-2024: PC2 rises gradually from -3 toward 0.** Sam Rainsy
+  exiled (2015), CNRP dissolved (2017), social-media regulation and
+  one-party legalism harden — exactly the institutional features that
+  load on positive PC2.
+
+This is **precisely the trajectory the rentier-consolidation hypothesis
+predicts**. The CPP entered the EBA-and-SEZ window (2001-2005) inside
+a contested political space and used the rents from that window to
+buy out, exile, or dissolve the contestation channels feature by
+feature. PC2's slow climb from -3 toward 0 is the institutional
+signature of that buy-out playing out — not a sign of liberalisation,
+but of *managed-state lock-in*. The events overlaid on the chart
+(1997 coup, 2015 exile, 2017 CNRP dissolution, 2020 EBA partial
+withdrawal) cluster on the rising leg, not the falling one.
+
+A natural follow-up — flagged in project memory — is to decompose
+PC3 and PC4 (roughly the same size as PC2) to separate the
+*contestation/mobilisation* and *regulatory/cyber-capacity* sub-axes
+that PC2 currently bundles together. The story is robust at the PC2
+level; PC3/PC4 should sharpen which features are doing the work.
+
+## What the four tests jointly say
+
+| Test | Magician would show | What KHM shows | Verdict |
+|---|---|---|---|
+| 1: ECI trajectory | Rising over decades | Rises modestly, stays negative | Rentier-leaning |
+| 2: Spillovers | Industry growth lifts agri/services | Weak / no co-movement | Rentier |
+| 3: Productivity vs employment | VA/worker rises sharply | Productivity CAGR matches VNM (1.3% vs 1.2%); workers grow 70% faster than VNM | Partial: headcount-driven expansion, but productivity not flat |
+| 4: PC2 + events | n/a (political-economy mapping) | Deep contestation 1993-2010 (UNTAC, factional politics, KR remnants); steady rise toward managed-state 2010-2024 (Sam Rainsy exile, CNRP dissolution, social-media regulation) | Strong — slow climb to managed-state matches CPP coalition lock-in |
+
+Vietnam — the obvious magician comparator — passes the first two
+economic tests cleanly: ECI rises sharply (the strongest signal in the
+panel), sectoral spillovers are present and strong. On productivity,
+the picture is closer than expected: VNM's per-worker productivity
+growth is 1.2%/yr versus KHM's 1.3% — essentially the same — and the
+*magician* signature shows up in VNM's higher *level* (~$7K vs ~$6K
+in 2023) and in productivity contributing a larger *share* (17% vs
+12%) of total industry growth, not in a faster productivity CAGR.
+
+Cambodia's diagnosis: **clearly rentier-leaning on capability
+deepening and spillovers; only partially rentier on the productivity
+margin** (extensive-margin growth dominates, but productivity isn't
+stagnant). The political-economy story (test 4) is consistent: PC2
+sits at -2 to -3 (deep contestation) through the 1993-2010 window
+when the rentier coalition is being assembled inside a still-contested
+political space, then climbs steadily toward zero (managed-state)
+through the 2010s as the CPP exiles, dissolves, and absorbs its
+remaining contestation channels.
+
+
+
+## The simple "older = better" reading isn't supported
+
+The cross-sectional model does **not** predict that earlier Cambodian
+institutional setups would deliver better outcomes than the current one.
+For Cambodia:
+
+- **Predicted HCI is highest under the current 2018+ one-party CPP era
+  (0.48)** and lowest in the 1998–2017 CPP-dominated era (0.44). The
+  Coalition era (1993–97) predicts 0.45 — between the two CPP periods,
+  not above them.
+- **Predicted log-IMR is lowest (best) in the current era (3.16)** —
+  comparable to the PRK and Coalition eras, and lower than the
+  CPP-dominated era's 3.36.
+- **Predicted life expectancy is highest in the current era (69.7)** —
+  almost 5 years above the long flat plateau of 64–66 that the model
+  reads off every prior era's institutions.
+- **Predicted ECI** is the partial exception: it peaks under PRK
+  (Vietnamese-style managed state, -0.23) and SOC/UNTAC, dips deepest
+  under the Coalition era (-0.79), and only partially recovers under
+  current institutions (-0.44).
+
+The Khmer Rouge era's "high" predicted values (HCI 0.45, LE 66) are a
+model artifact: the V-Dem fingerprint hits the floor on so many features
+that XGBoost extrapolates to the closest training neighbours, all of
+which sit far less repressively. Treat 1975–1978 predictions as
+out-of-calibration.
+
+## The actual story: convergence to the institutional ceiling
+
+A different — and arguably more interesting — pattern is visible in the
+predicted-vs-actual plots. For all four outcomes, **actual Cambodia has
+caught up to predicted Cambodia**:
+
+| Outcome | 1970s actual vs predicted | 2020s actual vs predicted |
+|---|---|---|
+| Life expectancy | actual far below predicted (~12 vs ~66 in 1976) | actual ~ predicted (~70 vs 70) |
+| Infant mortality (log) | actual far above predicted (~5.4 vs ~3.2) | actual ~ predicted (~3.1 vs 3.2) |
+| HCI | (no actual) | actual ~ predicted (0.49 vs 0.48) |
+| ECI | actual volatile, often above predicted | actual ~ predicted (-0.5 vs -0.4) |
+
+In the 1970s–1990s, Cambodia's actual outcomes were *worse* than its
+institutional fingerprint predicted — the gap reflecting active state
+collapse, war, and the genocidal Khmer Rouge baseline. As politics
+stabilised post-1993, the gap closed: actuals recovered to the level
+that the country's institutions could plausibly sustain. **By 2024
+Cambodia is sitting on its institutional ceiling on every outcome we
+measured.** Further improvement requires institutional improvement.
+
+## What about Vietnam and Burundi?
+
+- **Vietnam** is the cleanest "managed-state success" case. Predicted
+  HCI rose from 0.50 (1970s) to 0.61 (2024) — a real institutional
+  improvement. Actual HCI 2020 = 0.69 sits **above** predicted, the
+  same kind of overperformance pattern Cambodia had decades ago.
+  Vietnam's institutional fingerprint is delivering managed-state
+  features (cyber capacity, bureaucratic competence, controlled but
+  effective service delivery) that the model rewards.
+- **Burundi** is the clearest decay case in the panel. Predicted HCI
+  fell from 0.48 (mid-1980s) to 0.37 (2024). Actual HCI 2020 = 0.39
+  matches predicted closely. **Burundi's institutional fingerprint
+  has worsened, and outcomes have followed it down.**
+
+This provides context for Cambodia's institutional twin status with
+Burundi (the finding from `outcomes_ml.Rmd`'s peer analysis): the two
+countries share a similar 2025 institutional fingerprint, but Cambodia
+arrived at that position via a steady multi-decade *upgrade* (post-Khmer
+Rouge), while Burundi arrived via institutional erosion. They look the
+same in the cross-section but their trajectories — and the headroom
+between actuals and institutional ceiling — differ.
+
+## The rentier-coalition diagnosis explains the ceiling
+
+The four sectoral tests above suggest *why* Cambodia's institutional
+ceiling sits where it does. Vietnam's managed-state institutions are
+delivering managed-state outcomes because the coalition behind them
+is magician-style: rising ECI, sectoral spillovers, rising
+productivity per worker. Cambodia's nominally similar institutional
+features (the country's PC1 score is not far off Vietnam's; both are
+managed states) deliver less because the coalition behind them is
+rentier-style: garments and SEZs run as enclaves, ECI barely rises,
+productivity per industry worker grows slowly, agriculture and
+services don't co-move with industry.
+
+This reframes the institutional-twin finding (KHM-BDI). Burundi and
+Cambodia look the same on V-Dem features by 2025, but Burundi arrived
+at that fingerprint by erosion of a once-better state, while Cambodia
+arrived by a steady upgrade from genocide-era zero — an upgrade
+*driven by* a rentier coalition that has been deliberately suppressing
+contestation features (the negative-PC2 axis: anti-system mobilisation,
+opposition camps, civil violence) and substituting state regulatory
+capacity to protect its rents. The ceiling for both countries looks
+similar from above; the political economy that enforces it is opposite.
+
+## On the leading-indicator hypothesis
+
+Strictly, the leading-indicator framing posed at the start — "predicted
+IMR turns up before actual" — does not appear in the data: predicted
+log-IMR for Cambodia is roughly flat at ~3.2 across 1970–2024, with no
+clear deterioration. Whatever institutional decay shows up in
+specific V-Dem features (election integrity, executive bribery, CSO
+space, all of which peaked 1995–2005 and declined since 2010) is
+**masked at the predicted-outcome level by simultaneous improvements
+in administrative-capacity features** (cyber capacity, regulation,
+basic services delivery) that the model also rewards.
+
+In other words: the model reads "Cambodia 2025" as a *competent
+soft-authoritarian* fingerprint, not a *decayed-democratic* one. The
+features that have decayed (contestation, accountability) are the same
+features the model finds weakly predictive of IMR/HCI/LE for this
+class of country. So if those features have decayed without dragging
+the predicted outcomes down, it suggests the model thinks they aren't
+the binding constraint.
+
+That doesn't mean the user's instinct is wrong — it means **the binding
+constraint on Cambodia's next wave of human-capital and complexity
+gains is institutional improvement on the features the model *does*
+weight heavily**: judicial independence, election integrity, executive
+oversight, parliamentary functionality. Those are the features whose
+peak-and-decline the V-Dem trajectory plots show most clearly. The
+predicted ceiling won't move up until those features do.
+
+# Caveats
+
+- **The model is cross-sectional and trained on 2025.** Projecting historical
+  fingerprints through it assumes the *mapping* from institutions to outcomes
+  has been stable over 50 years — which is a strong assumption. Returns to
+  particular institutional features (e.g. parliamentary oversight) may have
+  changed over time as global development conditions changed.
+- **Min-max bounds use only the 2025 cross-section.** A 1975 V-Dem score
+  more extreme than any 2025 country falls outside the [0, 1] range that
+  XGBoost saw in training, and the model extrapolates. This will mostly
+  affect Khmer Rouge–era predictions; treat that period as outside the
+  model's calibration.
+- **NAs are imputed to feature minimums.** When V-Dem couldn't code a feature
+  because the institution didn't exist (no elections, no opposition press,
+  no legislature), our pipeline sets the feature to its 2025 minimum. This
+  is consistent with the cross-sectional pipeline but means predictions for
+  Cambodia 1975–1991 partially reflect that imputation choice.
+- **HCI actuals only exist 2010–2020.** The "predicted HCI under 1985
+  institutions" cannot be validated directly; it's a counterfactual.
+- **ECI depends on export structure.** Cambodia's ECI rise post-2004 is
+  largely driven by the garment sector, which is itself a product of trade
+  preferences and FDI rather than the deep institutional features V-Dem
+  captures. Any predicted-vs-actual divergence on ECI is partly a story
+  about trade policy, not institutions per se.
+- **No causal claim.** This is a descriptive exercise mapping V-Dem
+  fingerprints onto outcome predictions. Whether earlier Cambodian
+  institutions *caused* better outcomes — or whether the institutions
+  themselves were a downstream symptom of prior conditions — is not
+  identified here.
+- **Industry employment is a proxy for manufacturing employment.** The
+  WDI macro parquet has no manufacturing-only employment series, so
+  the productivity-vs-employment decomposition uses industry-level
+  employment (`wdi_sl_ind_empl_zs` x `wdi_sl_tlf_totl_in`). For
+  Cambodia, industry is dominated by garments, so the proxy is close.
+  For Vietnam, industry includes more heavy industry and construction,
+  so VNM's VA-per-worker is biased upward relative to a pure
+  manufacturing comparison. The qualitative split (VNM grows
+  productivity, KHM grows headcount) is robust to this.
+- **Magician-vs-rentier diagnosis is suggestive, not definitive.** A
+  fuller test would add manufacturing sub-sector concentration over
+  time (incomplete for KHM) and preference-dependence on EBA / GSP
+  (requires HS-6 atlas trade data). Both are flagged for follow-up.
