@@ -65,7 +65,7 @@ gl_setup()
 ## V-Dem and macro panel
 
 ```{r load-vdem, cache=TRUE}
-vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
+vdem_raw <- read_parquet("data/shared-data/vdem/vdem.parquet")
 
 latest_year <- vdem_raw %>%
   filter(year >= 2020) %>%
@@ -145,7 +145,7 @@ vdem_latest <- vdem_raw %>%
 macro_cols <- indicator_map %>% filter(source == "macro") %>% pull(indicator) %>% unique()
 
 macro <- read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year", all_of(macro_cols))
 )
 
@@ -569,7 +569,7 @@ imperfect relationship — magician-friendly institutions are a
 
 ```{r magician-vs-eci, fig.width=6.5, fig.height=4.5}
 eci_latest <- read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year", "atl_sitc_eci")
 ) %>%
   filter(!is.na(atl_sitc_eci)) %>%

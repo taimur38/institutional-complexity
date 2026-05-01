@@ -60,8 +60,8 @@ with at least 150-country coverage, all C-type components with good coverage, mi
 normalised to [0, 1]. See `institutional_complexity.Rmd` for detail.
 
 ```{r build-mcp, cache=TRUE}
-vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
-vdem_codebook <- read_parquet("~/dev/shared-data/vdem/vdem_codebook.parquet")
+vdem_raw <- read_parquet("data/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("data/shared-data/vdem/vdem_codebook.parquet")
 
 latest_year <- vdem_raw %>%
   filter(year >= 2020) %>%
@@ -141,14 +141,14 @@ outcome_meta <- tribble(
 
 macro_cols <- outcome_meta %>% filter(source == "macro") %>% pull(column)
 macro <- read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year", macro_cols)
 )
 
 # IMF WoRLD 2026: pull income-tax (TaxInc) keyed by ISO3, rename to imf_tax_inc
 # so it matches outcome_meta$column.
 imf_world <- suppressMessages(
-  readxl::read_excel("~/dev/shared-data/world-imf2026.xlsx",
+  readxl::read_excel("data/shared-data/world-imf2026.xlsx",
                      sheet = "Data", guess_max = 20000)
 ) %>%
   transmute(countrycodeiso = ISO3, year, imf_tax_inc = TaxInc) %>%

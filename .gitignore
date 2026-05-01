@@ -5,3 +5,5 @@
 .RData
 .Rproj.user
 scratch/
+.claude/
+data/

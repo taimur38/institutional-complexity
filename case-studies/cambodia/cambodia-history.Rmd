@@ -75,8 +75,8 @@ later, so a 1975 Cambodia value gets placed on the same scale the model
 was trained on.
 
 ```{r build-mcp-2025, cache=TRUE}
-vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
-vdem_codebook <- read_parquet("~/dev/shared-data/vdem/vdem_codebook.parquet")
+vdem_raw <- read_parquet("data/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("data/shared-data/vdem/vdem_codebook.parquet")
 
 latest_year <- vdem_raw %>%
   filter(year >= 2020) %>%
@@ -201,7 +201,7 @@ outcome_meta <- tribble(
 )
 
 macro <- read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year", outcome_meta$column)
 )
 
@@ -812,7 +812,7 @@ sectoral_wdi <- macro %>%
 ```{r sectoral-va-load, cache=TRUE}
 # We need a richer set of sectoral fields than the outcome panel pulled.
 sectoral_full <- read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year",
                  "wdi_nv_agr_totl_kd", "wdi_nv_ind_totl_kd",
                  "wdi_nv_srv_totl_kd", "wdi_nv_ind_manf_kd",
@@ -911,7 +911,7 @@ stays flat or falls as growth piles into the same narrow basket.
 
 ```{r eci-trajectory, fig.height=3.6, cache=TRUE}
 eci_panel <- read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year", "atl_sitc_eci")
 ) %>%
   rename(iso3 = countrycodeiso) %>%

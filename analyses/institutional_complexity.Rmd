@@ -70,11 +70,11 @@ gl_setup()
 ## Load V-Dem data
 
 We load the full V-Dem dataset and codebook from the shared data directory
-(`~/dev/shared-data/vdem/`).
+(`data/shared-data/vdem/`).
 
 ```{r load-vdem, cache=TRUE}
-vdem_raw <- read_parquet("~/dev/shared-data/vdem/vdem.parquet")
-vdem_codebook <- read_parquet("~/dev/shared-data/vdem/vdem_codebook.parquet")
+vdem_raw <- read_parquet("data/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("data/shared-data/vdem/vdem_codebook.parquet")
 
 # Check the most recent years and coverage
 year_coverage <- vdem_raw %>%
@@ -1193,7 +1193,7 @@ iso3_lookup <- vdem_filtered %>%
   deframe()
 
 eci_latest <- arrow::read_parquet(
-  "~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
   col_select = c("countrycodeiso", "year", "atl_sitc_eci")
 ) %>%
   filter(!is.na(atl_sitc_eci)) %>%
@@ -2511,5 +2511,5 @@ ECI axis.
 
 ---
 
-*Analysis generated on `r Sys.Date()`. Data from V-Dem (loaded from `~/dev/shared-data/vdem/`)
+*Analysis generated on `r Sys.Date()`. Data from V-Dem (loaded from `data/shared-data/vdem/`)
 and World Development Indicators.*

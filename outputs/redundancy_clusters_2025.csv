@@ -1,0 +1,62 @@
+cluster_id,cluster_size,mean_within_r,indicator_code,indicator_name
+1,6,0.87,v2caassemb,Freedom of peaceful assembly 
+1,6,0.87,v2clacfree,Freedom of academic and cultural expression
+1,6,0.87,v2cldiscm,Freedom of discussion for men
+1,6,0.87,v2cldiscw,Freedom of discussion for women
+1,6,0.87,v2cseeorgs,CSO entry and exit
+1,6,0.87,v2csreprss,CSO repression
+2,5,0.866,v2mebias,Media bias
+2,5,0.866,v2mecrit,Print/broadcast media critical
+2,5,0.866,v2merange,Print/broadcast media perspectives
+2,5,0.866,v2meslfcen,Media self-censorship
+2,5,0.866,v2smonper,Online media perspectives 
+3,4,0.861,v2mecenefi,Internet censorship effort
+3,4,0.861,v2smgovfilprc,Government Internet filtering in practice 
+3,4,0.861,v2smgovsmcenprc,Government social media censorship in practice 
+3,4,0.861,v2smregcon,Internet legal regulation content 
+4,4,0.886,v2exbribe,Executive bribery and corrupt exchanges
+4,4,0.886,v2excrptps,Public sector corrupt exchanges
+4,4,0.886,v2exembez,Executive embezzlement and theft
+4,4,0.886,v2exthftps,Public sector theft
+5,4,0.869,v2cafexch,Freedom of academic exchange and dissemination  
+5,4,0.869,v2cafres,Freedom to research and teach  
+5,4,0.869,v2cainsaut,Institutional autonomy 
+5,4,0.869,v2casurv,Campus integrity  
+6,2,0.861,v2elembaut,EMB autonomy
+6,2,0.861,v2meharjrn,Harassment of journalists
+7,2,0.852,v2psbars,Barriers to parties
+7,2,0.852,v2psparban,Party ban
+8,2,0.902,v2elfrfair,Election free and fair
+8,2,0.902,v2elintim,Election government intimidation
+9,2,0.887,v2exdfcbhs,HOS appoints cabinet in practice
+9,2,0.887,v2exdfdmhs,HOS dismisses ministers in practice
+10,2,0.872,v2peedueq,Educational equality
+10,2,0.872,v2pehealth,Health equality
+11,2,0.853,v2dlconslt,Range of consultation
+11,2,0.853,v2dlengage,Engaged society
+12,2,0.911,v2juhcind,High court independence
+12,2,0.911,v2juncind,Lower court independence
+13,2,0.9,v2smgovab,Government dissemination of false information abroad 
+13,2,0.9,v2smgovdom,Government dissemination of false information domestic 
+14,2,0.866,v2smforads,Foreign governments ads 
+14,2,0.866,v2smfordom,Foreign governments dissemination of false information 
+15,2,0.862,v2clkill,Freedom from political killings
+15,2,0.862,v2cltort,Freedom from torture
+16,2,0.856,v2smarrest,Arrests for political content 
+16,2,0.856,v2smdefabu,Abuse of defamation and copyright law by elites 
+17,2,0.877,v2clrspct,Rigorous and impartial public administration
+17,2,0.877,v2cltrnslw,Transparent laws with predictable enforcement
+18,2,0.88,v2clslavef,Freedom from forced labor for women
+18,2,0.88,v2clslavem,Freedom from forced labor for men
+19,2,0.857,v2clprptym,Property rights for men
+19,2,0.857,v2clprptyw,Property rights for women
+20,2,0.947,v2clacjstm,Access to justice for men
+20,2,0.947,v2clacjstw,Access to justice for women
+21,2,0.872,v2lginvstp,Legislature investigates in practice
+21,2,0.872,v2lgotovst,Executive oversight
+22,2,0.893,v2psorgs,Party organizations
+22,2,0.893,v2psprbrch,Party branches
+23,2,0.911,v2jucomp,Compliance with judiciary
+23,2,0.911,v2juhccomp,Compliance with high court
+24,2,0.92,v2smgovshut,Government Internet shut down in practice 
+24,2,0.92,v2smgovsm,Government social media shut down in practice 

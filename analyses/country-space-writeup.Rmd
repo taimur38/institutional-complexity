@@ -1,0 +1,620 @@
+---
+title: "The Country Space"
+subtitle: "Construction, Variable Choice, and Multi-Year Replication"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 6.5
+    fig_height: 4.5
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+# Overview
+
+This document is the clean writeup of how we construct a 2D **country space** from V-Dem
+governance indicators. It pulls together the version of the pipeline we have settled on
+after experimenting with several alternatives in `institutional_complexity.Rmd` (the
+"kitchen") and applies it to six benchmark years from **1975 to 2025**.
+
+The pipeline in one sentence: take every continuous V-Dem indicator with adequate coverage
+in the target year, z-score across countries so each indicator contributes equally, and
+embed the resulting country x feature matrix in 2D with UMAP using Euclidean distance.
+
+We deliberately avoid hand-picking indicators. The motivation, the consequences, and a few
+sensitivity checks live in Section 3.
+
+```{r packages}
+library(tidyverse)
+library(arrow)
+library(uwot)
+library(ggrepel)
+library(countrycode)
+library(knitr)
+library(patchwork)
+
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
+```
+
+```{r load-vdem}
+vdem_raw       <- read_parquet("data/shared-data/vdem/vdem.parquet")
+vdem_codebook  <- read_parquet("data/shared-data/vdem/vdem_codebook.parquet")
+```
+
+# 1. Why a country space?
+
+The Atlas of Economic Complexity uses a *product space* — a 2D map of products, with
+countries positioned by what they produce — to study how productive capabilities cluster
+and how countries diversify. The institutional analogue swaps "products" for V-Dem's
+expert-coded measures of governance: rule of law, electoral integrity, judicial
+independence, civil-society autonomy, and so on. A country's vector across these
+measures is its **institutional fingerprint**, and the country space is the 2D
+projection of those fingerprints.
+
+The point is not the absolute coordinates (any 2D embedding of a high-dimensional space
+is heuristic). The point is that countries with similar institutional architectures end
+up close together, and the resulting layout exposes regional and regime-type structure
+that is otherwise hidden in tables of correlation matrices.
+
+# 2. The data: V-Dem, year by year
+
+V-Dem provides expert-coded scores for ~500 governance variables per country per year,
+with full back-coverage to 1789 for established polities. Most of the variables we use
+are produced by a Bayesian IRT measurement model that pools expert codings into a
+continuous latent score (typically in roughly $[-4, +4]$). This continuity is what makes
+Euclidean distance a sensible thing to compute.
+
+We load the parquet snapshot maintained at `data/shared-data/vdem/vdem.parquet` and the
+companion codebook. Coverage by benchmark year:
+
+```{r year-coverage}
+benchmark_years <- c(1975, 1985, 1995, 2005, 2015, 2025)
+
+vdem_raw %>%
+  filter(year %in% benchmark_years) %>%
+  group_by(year) %>%
+  summarise(n_countries = n_distinct(country_name), .groups = "drop") %>%
+  kable(caption = "Country (polity) coverage by benchmark year")
+```
+
+V-Dem's polity count grows over the late 20th century as decolonization and the Soviet
+collapse fragment large polities into many smaller ones. We treat each year's panel as
+its own population: indicator selection and country selection are both done within the
+target year (see Section 3).
+
+# 3. Variable choice
+
+This is the most consequential design decision in the whole pipeline. Two reasonable
+positions exist:
+
+1. **Hand-pick** a curated set of, say, 20-40 governance indicators, chosen on
+   conceptual grounds. This is what most institutional-economics papers do.
+2. **Take all of them** and let the metric do the work. This is what we do.
+
+We pick (2) on the grounds that any hand-curated subset embeds the analyst's prior about
+what governance "is" — judiciary vs. media vs. elections — and a country space is
+supposed to be a *prior-light* map. The cost is that V-Dem ships indicator families
+that triangulate the same latent concept (multiple measures of judicial independence,
+multiple measures of media freedom). With min-max + Euclidean, those families implicitly
+upweight the dimensions they cover. We accept this for now and flag it at the end of
+this section. The Mahalanobis-whitened variant in `institutional_complexity.Rmd` is the
+robustness check.
+
+## What "continuous indicators" means concretely
+
+V-Dem's codebook tags every variable with a `vartype`:
+
+- **C** — Component: an expert-coded measurement, usually delivered as the IRT
+  latent score. These are the raw signals.
+- **A** — Aggregate / **D** — Derived: indices built from components (e.g., the
+  liberal-democracy index). Including these would double-count the components they are
+  built from.
+
+We keep only `vartype == "C"`. From those we further filter:
+
+- **Drop suffix variants.** Each base indicator ships with `_codelow`, `_codehigh`,
+  `_sd`, `_osp`, `_ord`, `_mean`, `_nr` companions (uncertainty bounds, ordinal
+  recodings, raw means, response counts). Only the base IRT score is kept.
+- **Drop multi-coder per-rater columns** (`_1`, `_2`, ...). These are individual
+  rater's codings, not aggregated scores.
+- **Drop two discrete-categorical components**: `v2regopploc` ("regime opposition
+  location") and `v2regsuploc` ("regime support location") are integer-coded categorical
+  variables, not IRT scores. Treating them as continuous numbers is meaningless and
+  they would dominate Euclidean distance because their nominal-integer scale is much
+  wider than the IRT $[-4, +4]$ range.
+- **Coverage filter.** Within the target year, an indicator must be observed for at
+  least 50% of countries. Rare or near-empty columns add noise without signal.
+- **Drop a small set of near-duplicate indicators** (see below).
+
+The filter is stated as a rule, not a list of approved tags. Applied to a different
+year, it will produce a slightly different indicator set as V-Dem coverage evolves
+(some indicators were added in later codebook waves; some have spotty coverage in
+the 1970s).
+
+## Pruning near-duplicate indicators
+
+The "all C-type indicators" rule keeps several indicator pairs/triples that V-Dem ships
+as conceptual duplicates — most obviously, every civil-liberty indicator coded
+separately for men and women, plus a few cause/effect pairs (high vs. lower court
+independence; general CSO repression vs. religious-organization repression). Empirically
+these pairs sit at $|r| \geq 0.85$ across the 2025 cross-section and contribute almost
+nothing beyond the base indicator. Concretely, hierarchical clustering on $1 - |r|$ at
+a $0.15$ cut surfaces 24 redundancy clusters covering 61 of the 192 indicators
+(see `outputs/redundancy_clusters_2025.csv` for the full table).
+
+We do **not** prune all 24 — many of those clusters bundle conceptually distinct
+mechanisms that just happen to co-vary in 2025 (executive-corruption vs.
+public-sector-corruption; censorship effort vs. self-censorship; polarization vs.
+political violence). Collapsing those would lose interpretable signal in panel or
+counterfactual analyses.
+
+We do prune a conservative list of **18 indicators** where the redundancy is structural
+rather than coincidental — gender-paired siblings, court-level pairs, religious-org-
+specific copies of general-CSO measures, and a handful of within-family duplicates. The
+v-dem advisor confirmed each as low-information beyond its kept counterpart. The full
+list is in the `redundant_drops` vector in the next chunk.
+
+The motivation is *not* dimensionality reduction for its own sake (a 174-vs-192-feature
+UMAP is essentially indistinguishable). The motivation is interpretability: when a
+country sits unusually far from its neighbors, we want that to mean something
+substantively distinct, not "scored low on women's property rights AND men's property
+rights AND access to justice for women AND..." with each gender-paired indicator
+counting again toward distance.
+
+## The construction function
+
+```{r build-country-space}
+discrete_vars <- c("v2regopploc", "v2regsuploc")
+
+# Near-duplicate indicators dropped per the redundancy analysis. Each tag here was
+# identified at |r| >= 0.85 against another indicator that we keep, and confirmed as
+# conceptually redundant by the v-dem advisor. Comments give the indicator we keep
+# in its place.
+redundant_drops <- c(
+  # Gender-paired siblings (drop the f/w version, keep the m version)
+  "v2cldmovew",   # vs v2cldmovem  — freedom of domestic movement
+  "v2cldiscw",    # vs v2cldiscm   — freedom of discussion
+  "v2clslavef",   # vs v2clslavem  — freedom from forced labor
+  "v2clprptyw",   # vs v2clprptym  — property rights
+  "v2clacjstw",   # vs v2clacjstm  — access to justice
+  # Court-level pairs (keep general / high court)
+  "v2juncind",    # vs v2juhcind   — high court independence subsumes lower court
+  "v2juhccomp",   # vs v2jucomp    — general compliance with judiciary subsumes high court
+  # Religious-org-specific copies of general CSO measures (keep general)
+  "v2csrlgrep",   # vs v2csreprss  — general CSO repression
+  "v2csrlgcon",   # vs v2cscnsult  — general CSO consultation
+  # Cabinet appoint/dismiss pair (keep appoint)
+  "v2exdfdmhs",   # vs v2exdfcbhs  — HOS appoints cabinet in practice
+  # Internet vs social-media shutdown twin (keep internet shutdown)
+  "v2smgovsm",    # vs v2smgovshut — government internet shutdown in practice
+  # Within-family near-duplicates flagged safe by the advisor
+  "v2lgqstexp",   # vs v2lginvstp  — legislature investigates is more general
+  "v2lglegplo",   # vs v2lgcomslo  — committee system is the structural measure
+  "v2merange",    # vs v2mebias    — bias is the more cited media-fairness measure
+  "v2dlreason",   # vs v2dlcommon  — common-good framing is more theoretically loaded
+  "v2psoppaut",   # vs v2cseeorgs  — CSO entry/exit subsumes opposition autonomy
+  "v2cafexch",    # vs v2cafres    — research/teach is the foundational right
+  "v2caconmob"    # vs v2cagenmob  — general mass mobilization subsumes concentration
+)
+
+# Region labels and lookup based on V-Dem's politico-geographic 6-region scheme.
+# A country's region doesn't change over time, so we pin it from its most recent
+# observation in V-Dem.
+region_labels <- c(
+  "1" = "E. Europe & Central Asia",
+  "2" = "Latin America & Caribbean",
+  "3" = "Middle East & N. Africa",
+  "4" = "Sub-Saharan Africa",
+  "5" = "W. Europe & N. America",
+  "6" = "East Asia & Pacific"
+)
+
+region_lookup <- vdem_raw %>%
+  group_by(country_name) %>%
+  slice_max(year, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(country_name, e_regionpol_6C) %>%
+  mutate(region = region_labels[as.character(e_regionpol_6C)]) %>%
+  select(country_name, region) %>%
+  deframe()
+
+# Per-codebook category labels for indicators (used in Section 6 sensitivity).
+prefix_categories <- c(
+  "el" = "Elections",            "ps" = "Political Parties",
+  "cl" = "Civil Liberties",      "ju" = "Judiciary",
+  "lg" = "Legislature",          "me" = "Media",
+  "ex" = "Executive",            "dl" = "Deliberation",
+  "ca" = "Academic & Cultural",  "cs" = "Civil Society",
+  "pe" = "Political Equality",   "st" = "State Capacity",
+  "sv" = "Sovereignty",          "dd" = "Direct Democracy",
+  "ed" = "Education",            "sm" = "Social Movements & Protest",
+  "re" = "Regime",               "te" = "Technology & Media Environment"
+)
+
+# Cache the column-name screen — it's expensive and year-invariant.
+suffixes        <- c("_codelow", "_codehigh", "_sd", "_osp",
+                     "_ord", "_mean", "_nr", "_rec")
+all_cols        <- names(vdem_raw)
+is_suffix       <- vapply(all_cols, function(x)
+                          any(vapply(suffixes, endsWith, logical(1), x = x)),
+                          logical(1))
+is_numbered     <- grepl("_\\d+$", all_cols)
+base_cols       <- all_cols[!is_suffix & !is_numbered]
+component_codes <- vdem_codebook %>%
+                     filter(vartype == "C") %>% pull(tag) %>% unique()
+candidate_codes <- intersect(component_codes, base_cols) %>%
+                     setdiff(discrete_vars) %>%
+                     setdiff(redundant_drops)
+candidate_codes <- candidate_codes[
+  vapply(candidate_codes, function(x) is.numeric(vdem_raw[[x]]), logical(1))
+]
+
+build_country_space <- function(target_year,
+                                min_indicator_coverage = 0.5,
+                                max_country_missing    = 0.5,
+                                seed = 42,
+                                n_neighbors = 15,
+                                min_dist = 0.2,
+                                n_epochs = 500) {
+  year_data <- vdem_raw %>% filter(year == target_year)
+  n_total   <- nrow(year_data)
+
+  coverage <- vapply(candidate_codes,
+                     function(x) sum(!is.na(year_data[[x]])),
+                     integer(1))
+  threshold <- min_indicator_coverage * n_total
+  indicators <- candidate_codes[coverage >= threshold]
+
+  raw <- year_data %>%
+    select(country_name, all_of(indicators)) %>%
+    mutate(p_missing = rowSums(is.na(across(all_of(indicators)))) /
+                       length(indicators)) %>%
+    filter(p_missing < max_country_missing) %>%
+    select(-p_missing) %>%
+    column_to_rownames("country_name") %>%
+    as.matrix()
+
+  # Column-mean imputation. Within-year, within-feature mean is a reasonable
+  # neutral fill since the IRT score is approximately mean-centered globally.
+  for (j in seq_len(ncol(raw))) {
+    na_idx <- is.na(raw[, j])
+    if (any(na_idx)) raw[na_idx, j] <- mean(raw[, j], na.rm = TRUE)
+  }
+
+  Mz <- scale(raw, center = TRUE, scale = TRUE)
+  # Drop any feature with zero within-year variance (would produce NaN after scale).
+  Mz <- Mz[, !is.nan(colSums(Mz)), drop = FALSE]
+
+  set.seed(seed)
+  emb <- umap(Mz, n_neighbors = n_neighbors,
+              min_dist = min_dist, n_epochs = n_epochs)
+
+  coords <- tibble(
+    country = rownames(Mz),
+    UMAP1   = emb[, 1],
+    UMAP2   = emb[, 2],
+    region  = unname(region_lookup[country])
+  ) %>%
+    mutate(region = replace_na(region, "Other"))
+
+  list(
+    year         = target_year,
+    n_countries  = nrow(Mz),
+    n_indicators = ncol(Mz),
+    indicators   = colnames(Mz),
+    Mz           = Mz,
+    coords       = coords
+  )
+}
+```
+
+# 4. Building the matrix
+
+We illustrate on the most recent year (2025) and then run all six.
+
+```{r build-2025}
+sp_2025 <- build_country_space(2025)
+
+cat("Year 2025\n")
+cat("  Countries:", sp_2025$n_countries, "\n")
+cat("  Indicators:", sp_2025$n_indicators, "\n")
+cat("  Mean per-feature SD after z-scoring (should be 1):",
+    round(mean(apply(sp_2025$Mz, 2, sd)), 3), "\n")
+```
+
+The matrix is `r sp_2025$n_countries` countries x `r sp_2025$n_indicators` indicators.
+Each row is a country's institutional fingerprint, each column is z-scored across
+countries so a one-unit move in any column equals one cross-country standard deviation
+in that indicator. Pairwise Euclidean distances on `Mz` are then directly interpretable
+as "total cross-country-standardized institutional difference" — large values mean
+two countries differ by many SDs across many indicators.
+
+## Why z-score, not min-max?
+
+The earlier exploration in `institutional_complexity.Rmd` used min-max normalization
+to rescale every indicator to $[0, 1]$. That works for the EC-style proximity
+calculations but distorts Euclidean geometry: a feature with a few extreme tail values
+gets squashed into the same $[0, 1]$ range as a feature with broad variation, so the
+former contributes much less to inter-country distance than its actual signal warrants.
+Z-scoring puts every indicator on the same SD scale and is the right choice when the
+downstream operation is Euclidean distance.
+
+## Why mean-impute, not drop?
+
+Coverage at the indicator level is already filtered (>= 50% of countries). At the
+country level we drop rows with > 50% missing on the kept indicators. The remaining
+NAs (typically a few percent) are imputed at the column mean. This biases the imputed
+country toward the global average on the missing dimension, which is the most
+defensible neutral fill — it neither helps nor hurts the country's distance to its true
+neighbors *on that dimension*, just shrinks variance toward zero on the imputed slots.
+
+# 5. Embedding: UMAP with Euclidean distance
+
+UMAP defaults to Euclidean distance, and we keep that default. We run on the full
+z-scored matrix (`Mz`), not on a precomputed distance matrix or PCA truncation. That
+keeps the local-neighborhood structure UMAP is designed to preserve in terms of the
+metric we actually care about. We use mild hyperparameters
+(`n_neighbors = 15`, `min_dist = 0.2`) — small enough to surface clusters, large
+enough that the layout is not stringy.
+
+Two caveats worth keeping in mind:
+
+- UMAP layouts are stochastic. We set `set.seed(42)` for reproducibility, but a
+  different seed (or a different indicator set on a re-run) can rotate, flip, or
+  modestly rearrange the layout. Cluster structure is stable; absolute coordinates
+  are not.
+- 2D coordinates across years are **not aligned**. Each year is embedded
+  independently. Compare structure (which clusters exist, who is in them, how
+  isolated they are), not coordinates.
+
+```{r plot-2025, fig.width=7, fig.height=7}
+ggplot(sp_2025$coords, aes(UMAP1, UMAP2, color = region)) +
+  geom_point(size = 2.4, alpha = 0.75) +
+  geom_text_repel(aes(label = country),
+                  size = 2.3, max.overlaps = 25,
+                  segment.alpha = 0.3,
+                  show.legend = FALSE) +
+  labs(x = "UMAP 1", y = "UMAP 2",
+       title = "Country space, 2025",
+       color = NULL) +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/country_space_2025.png", width = 9, height = 9, dpi = 300)
+```
+
+# 6. Multi-year replication
+
+We run the same pipeline for the six benchmark years and lay them out as small
+multiples. The indicator set is re-derived each year from the coverage rule, so
+older years use a slightly leaner set (some V-Dem indicators were added in later
+codebook waves; others have thinner pre-1990 coverage).
+
+```{r build-all-years, cache=TRUE}
+spaces <- map(benchmark_years, build_country_space)
+names(spaces) <- as.character(benchmark_years)
+
+space_summary <- map_dfr(spaces, function(s) {
+  tibble(year = s$year, n_countries = s$n_countries,
+         n_indicators = s$n_indicators)
+})
+kable(space_summary,
+      caption = "Pipeline output by year (countries kept; indicators kept).")
+```
+
+```{r save-coords}
+# Persist coordinates for downstream use.
+all_coords <- map_dfr(spaces, function(s)
+  s$coords %>% mutate(year = s$year)) %>%
+  select(year, country, region, UMAP1, UMAP2)
+
+write_csv(all_coords, "outputs/country_space_coords_by_year.csv")
+
+# Also save the per-year matrices for any downstream analysis.
+saveRDS(spaces, "scratch/country_spaces_by_year.rds")
+```
+
+How indicator availability changes over the panel:
+
+```{r indicator-availability, fig.width=6.5, fig.height=3}
+indicator_panel <- map_dfr(spaces, function(s)
+  tibble(year = s$year, indicator = s$indicators)) %>%
+  mutate(
+    prefix   = sub("^v[23](\\w{2}).*", "\\1", indicator),
+    category = unname(prefix_categories[prefix]),
+    category = replace_na(category, "Other")
+  )
+
+indicator_panel %>%
+  count(year, category) %>%
+  mutate(year = factor(year)) %>%
+  ggplot(aes(x = year, y = n, fill = category)) +
+  geom_col(position = "stack") +
+  labs(x = NULL, y = "Indicators kept", fill = "Category",
+       title = "Indicator set composition by year")
+
+save_fig("full", "country_space_indicator_panel.pdf")
+```
+
+```{r indicator-set-stability}
+# How stable is the *set* of indicators across years?
+sets <- map(spaces, "indicators")
+core <- Reduce(intersect, sets)
+union_all <- Reduce(union, sets)
+
+tibble(
+  Metric = c("Indicators kept in every year (core)",
+             "Indicators kept in at least one year (union)",
+             "Core / union ratio"),
+  Value  = c(length(core),
+             length(union_all),
+             sprintf("%.2f", length(core) / length(union_all)))
+) %>%
+  kable(caption = "Indicator-set overlap across the six years")
+```
+
+The core set — indicators that pass the coverage filter in every benchmark year — is
+what we'd use if we wanted **strict** cross-year comparability of the input matrix. We
+report it but do not enforce it on the layouts: re-running with the year-specific
+sets gives each panel the most informative space available for that year, which is
+what a domain reader probably wants. Each year's space gets its own page below.
+
+```{r plot-fn}
+plot_country_space <- function(sp, label_size = 2.6, point_size = 2.4) {
+  ggplot(sp$coords, aes(UMAP1, UMAP2, color = region)) +
+    geom_point(size = point_size, alpha = 0.85) +
+    geom_text_repel(
+      aes(label = country),
+      size = label_size, max.overlaps = 40,
+      segment.alpha = 0.3, show.legend = FALSE
+    ) +
+    labs(
+      x = "UMAP 1", y = "UMAP 2", color = NULL,
+      title = sprintf("Country space, %d", sp$year),
+      subtitle = sprintf("%d countries x %d V-Dem indicators (z-scored, UMAP, Euclidean)",
+                         sp$n_countries, sp$n_indicators)
+    ) +
+    theme(legend.position = "bottom")
+}
+
+# Persist per-year PNGs alongside the inline plots below.
+for (yr in benchmark_years) {
+  ggsave(
+    sprintf("imgs/country_space_%d.png", yr),
+    plot_country_space(spaces[[as.character(yr)]]),
+    width = 9, height = 9, dpi = 300
+  )
+}
+```
+
+\newpage
+
+## 1975
+
+```{r plot-1975, fig.width=7, fig.height=8.2, out.width="100%"}
+plot_country_space(spaces[["1975"]])
+```
+
+\newpage
+
+## 1985
+
+```{r plot-1985, fig.width=7, fig.height=8.2, out.width="100%"}
+plot_country_space(spaces[["1985"]])
+```
+
+\newpage
+
+## 1995
+
+```{r plot-1995, fig.width=7, fig.height=8.2, out.width="100%"}
+plot_country_space(spaces[["1995"]])
+```
+
+\newpage
+
+## 2005
+
+```{r plot-2005, fig.width=7, fig.height=8.2, out.width="100%"}
+plot_country_space(spaces[["2005"]])
+```
+
+\newpage
+
+## 2015
+
+```{r plot-2015, fig.width=7, fig.height=8.2, out.width="100%"}
+plot_country_space(spaces[["2015"]])
+```
+
+\newpage
+
+## 2025
+
+```{r plot-2025-panel, fig.width=7, fig.height=8.2, out.width="100%"}
+plot_country_space(spaces[["2025"]])
+```
+
+\newpage
+
+# 7. What the panel shows
+
+A few observations are worth flagging without over-interpreting:
+
+- **Regional clustering is the dominant first-order pattern in every year.** That is
+  reassuring: countries that share political-cultural neighborhoods do tend to share
+  institutional features. It is also a bit of a Rorschach — the layout reflects
+  genuine institutional similarity *and* the V-Dem coding tradition's decision to
+  benchmark some indicators against regional norms.
+
+- **The Western Europe & North America cluster is tight in every year.** This is
+  the "consolidated liberal democracies" anchor.
+
+- **The post-Soviet space appears suddenly in 1995.** Pre-1991 the USSR is one polity;
+  post-1991 it fragments into 15 successor states which then drift across the country
+  space at different speeds (the Baltics moving toward the W. European cluster, Central
+  Asia moving toward the closed-autocracy region, Russia carving out its own neighborhood).
+
+- **The Middle East & North Africa region is unusually compact in earlier decades and
+  starts to spread in 2015-2025.** This is the post-Arab-Spring institutional
+  reshuffling visible in the data.
+
+- **East Asia & Pacific is bimodal across the whole panel.** Japan/Korea/Taiwan/Australia
+  pull toward the W. European cluster; China and its closer neighbors form a distinct
+  pole. The middle (Indonesia, Philippines, India in adjacent regions) shifts year by
+  year.
+
+These observations are descriptive. The mapping from country-space neighborhoods to
+specific institutional features happens in `institutional_complexity.Rmd` (the
+cluster-feature `z`-deviation analysis at the end of Section 6 there) and is not reproduced
+here.
+
+# 8. Limitations and what to read next
+
+- **2025 is not the maximum-coverage year.** V-Dem's indicator availability declines as
+  we approach the present (242 indicators pass the 50% rule in 2020-2021, 215 in 2022-2023,
+  192 in 2024-2025). 2024 has identical coverage to 2025, so swapping to 2024 buys nothing;
+  swapping to 2021 would gain ~50 indicators at the cost of four years of currency. We keep
+  2025 as the endpoint, but the alternative schedule (1971/81/91/01/11/21) is a one-line
+  change to `benchmark_years` if richer coverage matters more than recency.
+
+- **All-continuous-indicators** is a deliberate choice, not the only one. The
+  Mahalanobis-whitened variant in `institutional_complexity.Rmd` checks how much the
+  feature-family bundling distorts the Euclidean layout (answer: not much in 2025,
+  but the comparison is worth re-running for older years before drawing strong
+  cross-year conclusions about *structure*).
+
+- **Mean imputation** biases imputed countries toward the global mean *only on the
+  missing dimensions*. If a country has 30%-50% missing coverage, the imputation can
+  pull it noticeably toward the centroid. For the most recent years this is rare; for
+  1975 and 1985 it is more common, especially among newly independent states. The
+  per-country missingness distribution is a useful diagnostic to add if a specific
+  country's position seems off.
+
+- **Coordinates are not comparable across years.** Treat each panel as its own map.
+  A formal "trajectory" analysis — same country across years — would require either
+  a joint embedding (concat the matrices, embed once) or a Procrustes-style
+  alignment of per-year layouts. Both are reasonable next steps and are sketched in
+  `case-studies/cambodia/cambodia-history.Rmd` for a single country, but not
+  generalized.
+
+- **Variable selection is the next thing to revisit.** The "all C-type indicators"
+  rule is a starting point. A natural follow-up is to check whether dropping the
+  top-loading indicator family (e.g., "all elections-related indicators") materially
+  changes the layout — that would tell us how much of the country-space is being
+  driven by a single conceptual axis vs. genuinely multidimensional institutional
+  variation.

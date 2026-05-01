@@ -45,7 +45,7 @@ of the whole exercise; it should be stated explicitly in any write-up.
 ## Indicator mapping
 
 V-Dem tags refer to the raw V-Dem dataset at
-`~/dev/shared-data/vdem/vdem.parquet` (codebook in
+`data/shared-data/vdem/vdem.parquet` (codebook in
 `vdem_codebook.parquet`). `qog_vdem_*` and `wgi_*` columns are pre-loaded
 in `macro_df` via the QoG dataset.
 
