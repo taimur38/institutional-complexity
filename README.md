@@ -10,6 +10,7 @@ governance data. The output of each `.Rmd` is a self-contained PDF.
 | `analyses/deals-development.Rmd` | `analyses/deals-development.pdf` | Maps V-Dem/QoG indicators to the Pritchett-Sen-Werker stakeholder typology to score country-by-stakeholder fit. |
 | `case-studies/cambodia/cambodia-history.Rmd` | `case-studies/cambodia/cambodia-history.pdf` | Cambodia 1970–2025: institutional fingerprint trajectory passed through the cross-sectional ML model. |
 | `case-studies/cambodia/cambodia-pca-peers-analysis.md` | — | Standalone narrative: Cambodia's PC1/PC2 position decomposed feature-by-feature against its Mekong neighbours. |
+| `apps/country-profile/` | Vite React app | Interactive country profile tool. First feature: animated 1975–2025 country-space trajectory with searchable selection, hover identification, k=4 nearest-neighbour overlay, persistent trails, and force-directed labels. |
 
 `TASK.md` is the original task spec for `institutional_complexity.Rmd`. Treat it as
 historical — the actual code has evolved past it.
@@ -59,14 +60,15 @@ Sits on top of the same Mcp construction, adds:
 
 ## Data
 
-All inputs live under `~/dev/shared-data/`. Read paths only — never write.
+All inputs live under `data/shared-data/`. Read paths only — never write.
 
 | Path | Use |
 |---|---|
-| `~/dev/shared-data/vdem/vdem.parquet` | V-Dem country-year scores (long), used for both Rmds |
-| `~/dev/shared-data/vdem/vdem_codebook.parquet` | Codebook: `tag`, `name`, `vartype` (filter `vartype == "C"` for components) |
-| `~/dev/shared-data/growth-lab/glmacro_master_alldata.parquet` | Macro outcomes panel; columns prefixed by source (`wdi_`, `weo_`, `atl_`) |
-| `~/dev/shared-data/world-imf2026.xlsx` (sheet `Data`) | IMF WoRLD income-tax variable (`TaxInc`) — joined as `imf_tax_inc` |
+| `data/shared-data/vdem/vdem.parquet` | V-Dem country-year scores (long), used for both Rmds |
+| `data/shared-data/vdem/vdem_codebook.parquet` | Codebook: `tag`, `name`, `vartype` (filter `vartype == "C"` for components) |
+| `data/shared-data/vdem/vdem_codebook.md` | Greppable markdown rendering of the codebook (regenerate via `Rscript scratch/build_vdem_codebook_md.R`) |
+| `data/shared-data/growth-lab/glmacro_master_alldata.parquet` | Macro outcomes panel; columns prefixed by source (`wdi_`, `weo_`, `atl_`) |
+| `data/shared-data/world-imf2026.xlsx` (sheet `Data`) | IMF WoRLD income-tax variable (`TaxInc`) — joined as `imf_tax_inc` |
 
 When choosing a new outcome variable from the macro parquet, **use the
 `macro-dataset-advisor` subagent** (per project CLAUDE.md). Do not guess column names.
@@ -116,6 +118,23 @@ rm -f join_* run-sweep_* sweep-table_* sweep-plot_* best-depth-table_* \
 
 The PCA / institutional-peer chunks are independent of `outcome_meta` and stay valid.
 
+## Country-profile app
+
+Interactive viewer for the joint-UMAP country trajectory (1975–2025). The
+trajectory CSV produced by `scratch/country_space_animation.R` is converted to
+JSON by `apps/country-profile/scripts/export_data.R` and consumed by a Canvas
+renderer that does cubic-in-out tweening, hover identification, click-to-toggle
+selection, k=4 nearest-neighbour overlay (recomputed per frame), trails, and a
+force-directed label layout that resolves overlap each frame.
+
+```bash
+# regenerate JSON when outputs/country_space_trajectory.csv changes
+Rscript apps/country-profile/scripts/export_data.R
+
+# dev server
+cd apps/country-profile && npm install && npm run dev
+```
+
 ## Files map
 
 ```
@@ -133,6 +152,11 @@ case-studies/
     cambodia-history.pdf           ← knitted output
     cambodia-pca-peers-analysis.md ← PC-space peer decomposition narrative
     thoughts-cambodia.md           ← scratch notes
+apps/
+  country-profile/                 ← Vite React + TS country profile tool
+    public/{tracks,meta}.json      ← exported coords, regions, color map
+    scripts/export_data.R          ← regenerates the JSON from outputs/
+    src/                           ← components, interpolation, layout
 TASK.md                            ← original spec for institutional_complexity.Rmd (stale)
 imgs/                              ← exported figures (shared across analyses)
 outputs/                           ← exported CSVs (shared across analyses)
@@ -141,7 +165,7 @@ scratch/                           ← exploratory R scripts (gitignored)
 ```
 
 Each Rmd sets `knitr::opts_knit$set(root.dir = ...)` in its setup chunk so that
-relative paths (`imgs/`, `outputs/`, `scratch/`, `~/dev/shared-data/...`) resolve
+relative paths (`imgs/`, `outputs/`, `scratch/`, `data/shared-data/...`) resolve
 from the project root regardless of where the Rmd is nested.
 
 ## Required R packages
@@ -150,7 +174,7 @@ Core: `tidyverse`, `arrow`, `knitr`, `xgboost`, `shapviz` (for `outcomes_ml.Rmd`
 `uwot`, `ggrepel`, `countrycode`, `WDI`, `pheatmap`, `igraph`, `RColorBrewer`, `DT`
 (for `institutional_complexity.Rmd`).
 
-V-Dem itself is loaded from the parquet under `~/dev/shared-data/vdem/`; the
+V-Dem itself is loaded from the parquet under `data/shared-data/vdem/`; the
 `vdemdata` R package mentioned in `TASK.md` is no longer used.
 
 ## References

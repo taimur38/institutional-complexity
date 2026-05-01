@@ -1,0 +1,17 @@
+{
+  "year_range": [1975, 2025],
+  "observation_years": [1975, 1985, 1995, 2005, 2015, 2025],
+  "default_duration_seconds": 18,
+  "default_fps": 30,
+  "easing": "cubic-in-out",
+  "regions": {
+    "E. Europe & Central Asia": "#266798",
+    "East Asia & Pacific": "#C64646",
+    "Latin America & Caribbean": "#36B250",
+    "Middle East & N. Africa": "#EAC218",
+    "Sub-Saharan Africa": "#D1852A",
+    "W. Europe & N. America": "#52E2DE"
+  },
+  "source": "outputs/country_space_trajectory.csv",
+  "notes": "Coordinates normalized to [0,1] using padded global UMAP bounds. y is flipped so 0 = top of canvas."
+}
