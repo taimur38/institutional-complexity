@@ -562,11 +562,12 @@ plot_country_space(spaces[["2025"]])
 
 A few observations are worth flagging without over-interpreting:
 
-- **Regional clustering is the dominant first-order pattern in every year.** That is
-  reassuring: countries that share political-cultural neighborhoods do tend to share
-  institutional features. It is also a bit of a Rorschach — the layout reflects
-  genuine institutional similarity *and* the V-Dem coding tradition's decision to
-  benchmark some indicators against regional norms.
+- **Regional clustering is the dominant first-order pattern in every year.** Countries
+  that share political-cultural neighborhoods do tend to share institutional features.
+  This is a substantive finding rather than a coding artifact: V-Dem's IRT measurement
+  model with bridge coders and anchoring vignettes is explicitly designed to place
+  coders from different countries onto a common latent scale, and no Component
+  indicator instructs coders to benchmark a country against its region.
 
 - **The Western Europe & North America cluster is tight in every year.** This is
   the "consolidated liberal democracies" anchor.
@@ -575,10 +576,6 @@ A few observations are worth flagging without over-interpreting:
   post-1991 it fragments into 15 successor states which then drift across the country
   space at different speeds (the Baltics moving toward the W. European cluster, Central
   Asia moving toward the closed-autocracy region, Russia carving out its own neighborhood).
-
-- **The Middle East & North Africa region is unusually compact in earlier decades and
-  starts to spread in 2015-2025.** This is the post-Arab-Spring institutional
-  reshuffling visible in the data.
 
 - **East Asia & Pacific is bimodal across the whole panel.** Japan/Korea/Taiwan/Australia
   pull toward the W. European cluster; China and its closer neighbors form a distinct
