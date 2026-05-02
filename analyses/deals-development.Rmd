@@ -76,6 +76,13 @@ library(knitr)
 library(tidytext)  # reorder_within, scale_y_reordered
 
 source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+```
+
+```{r gl-setup, cache=FALSE}
+# gl_setup() must run uncached so the GL theme applies to any newly-rendered
+# chunk on every knit, regardless of whether the packages chunk was served
+# from cache. gl_setup() also self-registers a knitr chunk hook that
+# re-applies the theme before each chunk runs.
 gl_setup()
 ```
 
@@ -580,10 +587,10 @@ psw_prefs_long <- psw_prefs %>%
 
 ```{r rents-grid-fn}
 axis_short_labels <- c(
-  transparent_rules     = "Transp.\nrules",
-  common_infra          = "Common\ninfra",
-  specialized_infra     = "Special.\ninfra",
-  contract_enforcement  = "Contract\nenf.",
+  transparent_rules     = "Transp. rules",
+  common_infra          = "Common infra",
+  specialized_infra     = "Special. infra",
+  contract_enforcement  = "Contract enf.",
   subsidies_clientelism = "Subsidies",
   exclusivity           = "Exclusivity"
 )
@@ -647,7 +654,7 @@ ggplot(focus_grid,
        title = "Policy-demand satisfaction matrix by country",
        subtitle = "Coloured = stakeholder demands this policy; blank = no demand") +
   theme(legend.position = "bottom",
-        axis.text.x = element_text(size = 7),
+        axis.text.x = element_text(size = 7, angle = 45, hjust = 1, vjust = 1),
         axis.text.y = element_text(size = 8),
         strip.text  = element_text(size = 9, face = "bold"))
 ```
@@ -930,9 +937,9 @@ ggplot(settle_pc2_focus, aes(x = horizontal, y = contested)) +
   scale_x_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1)) +
   scale_y_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1)) +
   labs(x = "Horizontal: concentration among political groups (high = one dominant)",
-       y = "Contested (PC2 percentile, high = mobilized / chaotic politics)",
+       y = "Contested State (high = mobilized / chaotic politics)",
        title = "Political settlement — horizontal × contested (PC2)",
-       subtitle = "PC2 from institutional_complexity.Rmd PCA: high = anti-system mobilization, polarization, political violence")
+       subtitle = "PC2: high = anti-system mobilization, polarization, political violence")
 ```
 
 # Country profiles
