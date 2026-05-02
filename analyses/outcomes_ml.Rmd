@@ -9,7 +9,9 @@ output:
     toc_depth: 3
     fig_width: 6.5
     fig_height: 4.5
-    latex_engine: pdflatex
+    latex_engine: xelatex
+    includes:
+      in_header: ~/dev/gl-design/skills/gl-ggplot/assets/gl_pdf.tex
 ---
 
 ```{r setup, include=FALSE}
@@ -46,7 +48,12 @@ library(arrow)
 library(knitr)
 library(xgboost)
 library(shapviz)
+```
 
+```{r gl-setup, cache=FALSE}
+# Uncached so showtext / sysfonts re-attach on every knit and gl_setup()
+# can self-install its knitr chunk hook. See deals-development.Rmd for the
+# rationale.
 source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
 gl_setup()
 ```
