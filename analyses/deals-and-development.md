@@ -1,9 +1,19 @@
 # Deals and Development workstream
 
-Mapping V-Dem and Gothenburg QoG indicators to the Pritchett–Sen–Werker
-(2018, *Deals and Development*, OUP) stakeholder typology, then scoring
-countries on how strongly their institutions reflect each stakeholder's
-preferred policy bundle.
+Mapping V-Dem and Gothenburg QoG indicators to the three analytical
+lenses of Pritchett, Sen & Werker (2018, *Deals and Development*,
+OUP): the **rents space** (which stakeholder coalitions' policy
+bundles are being supplied), the **deals space** (open/closed ×
+ordered/disordered), and the **political settlement** (Khan 2010 —
+vertical × horizontal power within the ruling coalition).
+
+An earlier iteration of this workstream tried to compress the
+rents-space read into a single stakeholder-fit score per country
+(magician share, rentier share, etc.). That approach is archived in
+`_archive_deals-development_stakeholder-fit.Rmd` — it overreached the
+data by collapsing three orthogonal lenses into one number. The
+current document treats the three reads as complementary and renders
+each separately.
 
 ## The framework
 
@@ -34,13 +44,11 @@ rentiers are the partial-reform outlier.
 ## Working assumption
 
 PSW's matrix describes what each stakeholder *wants*, not what each
-country *gets*. We are deliberately treating realised institutional
-outcomes as **revealed bargaining power**: a country whose institutions
-score high on transparent rules + contract enforcement + public-goods
-spending and low on exclusivity is one where the magician/workhorse
-coalition has been winning; a country with the inverse profile is one
-where powerbrokers/rentiers have. This is the load-bearing assumption
-of the whole exercise; it should be stated explicitly in any write-up.
+country *gets*. The **rents-space** read is built by checking which
+demanded policies a country's institutions actually supply — without
+committing to a single dominant stakeholder. The **deals space** and
+**political settlement** are computed from independent V-Dem
+composites and read alongside, not aggregated.
 
 ## Indicator mapping
 
@@ -49,106 +57,149 @@ V-Dem tags refer to the raw V-Dem dataset at
 `vdem_codebook.parquet`). `qog_vdem_*` and `wgi_*` columns are pre-loaded
 in `macro_df` via the QoG dataset.
 
+The active panel uses a deliberately small, non-overlapping indicator
+set. Earlier iterations included broader baskets (WGI rule-of-law,
+WJP indices, neopatrimonial composites, complexity indices); we
+trimmed those once it became clear they were either redundant with
+their V-Dem analogues or downstream outcomes of the very thing the
+axis is meant to measure.
+
 ### Axis 1 — Transparent rules
-- **v2cltrnslw** — Transparent laws with predictable enforcement (verbatim match)
-- **v2x_rule** — Rule of law index
-- **v2clrspct** — Rigorous and impartial public administration
-- QoG: `wgi_rqe`, `wgi_rle`, `qog_wjp_regul_enforc`, `qog_wjp_overall`
+- **v2cltrnslw** — Transparent laws with predictable enforcement
+  (V-Dem 0–4 ordinal: are laws clear, well publicised, coherent,
+  stable, and enforced predictably).
+- **v2clrspct** — Rigorous and impartial public administration (V-Dem
+  0–4 ordinal: do public officials apply the law without bias,
+  nepotism, or cronyism). Captures the bureaucratic-implementation
+  face that `v2cltrnslw` does not.
+
+Dropped: `v2x_rule`, `wgi_rle`, `wgi_rqe`, the WJP indices — all
+broadly redundant with the two kept indicators.
 
 ### Axis 2 — Common infrastructure
-V-Dem doesn't really capture infra stocks; one fiscal proxy plus WDI:
-- **v2dlencmps** — Particularistic vs. public-goods spending (high = public-goods budget mix)
-- WDI: `wdi_eg_elc_accs_zs` (electricity), `wdi_sh_h2o_basw_zs` (water), `wdi_se_sec_enrr` (secondary enrolment), `pwt_hc` (human capital)
-- QoG: `qog_wef_qoi` (transport infra quality), `qog_iiag_inf` (Africa only)
+- **v2dlencmps** — Particularistic vs. public-goods spending mix
+  (V-Dem 0–4 ordinal; high = public-goods budget mix).
+- `wdi_eg_elc_accs_zs` — share of population with electricity access.
+- `wdi_sh_h2o_basw_zs` — share of population with basic drinking
+  water access.
+
+Dropped: secondary enrolment, PWT human capital, transport-infra
+quality — these move us toward human capital / specialized infra
+rather than universal physical-network supply.
 
 ### Axis 3 — Specialized infrastructure
-No clean V-Dem proxy. Capability/outcome side:
-- `wdi_lp_lpi_infr_xq` (logistics infra quality), `wdi_is_shp_gcnw_xq` (port connectivity)
-- `wdi_gb_xpd_rsdv_gd_zs` (R&D), `wdi_tx_val_tech_mf_zs` (high-tech exports)
-- `atl_sitc_eci`, `atl_sitc_coi` (capability proxies)
+No V-Dem proxy. Outcome-side indicators only:
+- `wdi_lp_lpi_infr_xq` — Logistics Performance Index (infrastructure).
+- `wdi_is_shp_gcnw_xq` — Liner Shipping Connectivity Index.
+- `wdi_gb_xpd_rsdv_gd_zs` — R&D as % of GDP.
+- `wdi_tx_val_tech_mf_zs` — high-tech exports (% manufactured exports).
+
+Dropped: `atl_sitc_eci`, `atl_sitc_coi` — these are downstream
+*outcomes* of specialized institutional support and would risk
+circularity in sanity checks. Coverage on the kept WDI indicators is
+patchier than on the V-Dem axes.
 
 ### Axis 4 — Contract enforcement
-V-Dem judiciary battery is the cleanest fit:
-- **v2clprpty** — Property rights
-- **v2juncind** / **v2juhcind** — Lower / high court independence
-- **v2juhccomp** — Government compliance with high-court rulings
-- **v2jucorrdc** — Judicial bribery (reverse-coded)
-- **v2juaccnt** — Judicial accountability
-- QoG: `qog_wjp_civ_just`, `qog_wjp_cj_ef_enf`, `qog_fi_legprop`, `qog_prp_prp`
+We confirmed via the V-Dem codebook that `v2xcl_prpty` aggregates
+only the men's and women's property-rights indicators
+(`v2clprptym`, `v2clprptyw`) — it does not include the judicial
+battery. The judicial vars feed `v2x_jucon` / `v2x_rule` instead.
+So property rights and the judicial battery are non-redundant and
+both are kept:
+- **v2xcl_prpty** — Property rights composite.
+- **v2juncind** / **v2juhcind** — Lower / high court independence.
+- **v2juhccomp** — Government compliance with high-court rulings.
+- **v2jucorrdc** — Judicial bribery (high = less, no flip needed).
+- **v2juaccnt** — Judicial accountability for misconduct.
 
 ### Axis 5 — Subsidies / clientelism
-V-Dem is the best-in-class source here:
-- **v2xnp_client** — Clientelism Index (raw V-Dem; not loaded as `qog_vdem_*`)
-- **v2dlencmps** — Particularistic vs. public-goods spending (reverse-codes "subsidies-as-clientelism")
-- **v2psprlnks** — Party linkages (programmatic vs. clientelistic)
-- **v2elvotbuy** — Vote buying
-- QoG / fiscal: `qog_vdem_excrptps`, `wdi_gc_xpn_trft_zs` (subsidies+transfers, % of expense)
+- **v2xnp_client** — Clientelism Index (V-Dem Bayesian composite).
+- **v2dlencmps** (flipped) — particularistic-vs-public-goods spending
+  mix; flipped so high = particularistic.
+
+Dropped: `v2psprlnks` and `v2elvotbuy` are *inputs* to `v2xnp_client`,
+so keeping them as separate axis components would double-count. The
+flipped `v2dlencmps` is orthogonal to the composite (it's about
+fiscal spending mix, not political relationships) and keeps a fiscal
+face on the axis.
 
 ### Axis 6 — Exclusivity / barriers to entry
-V-Dem captures the political face; QoG captures the regulatory face:
-- **v2x_neopat** — Neopatrimonial Rule (cleanest "powerbroker world" composite)
-- **v2regsupgroups** — Regime support groups (useful for *identifying* the dominant stakeholder, not just measuring exclusivity)
-- **v2psparban**, **v2psoppaut** — Party ban, opposition autonomy
-- QoG: `qog_fi_reg` (Fraser business/credit/labor regulation), `qog_bti_mo` (organisation of market & competition), `wdi_ic_frm_cmpu_zs` (firms competing against unregistered competitors)
+Deliberate scope choice: market-side exclusivity only.
+- `qog_fi_reg` (flipped) — Fraser regulation index; flipped so high =
+  more restrictive regulation.
+- `qog_bti_mo` (flipped) — BTI organisation of market and competition;
+  flipped so high = a more captured / less competitive market.
 
-## Plan: country-level scoring (design "a")
+Dropped: `v2x_neopat`, `v2psparban`, `v2psoppaut`, `v2regsupgroups`.
+This is a deliberate scope choice: PSW's exclusivity-as-rent is an
+*economic*-exclusivity concept (regulatory barriers to entry,
+licensing, market capture), which is what `qog_fi_reg` and
+`qog_bti_mo` measure. The political face — party bans, opposition
+autonomy, neopatrimonial rule — belongs to the political-settlement
+side of the framework (drawn from Khan 2010), not to a stakeholder's
+demand bundle, and would muddle the institutional-supply read.
 
-1. Pull the indicators above into a country-by-indicator matrix for the
-   most recent year with broad coverage (likely 2022).
-2. Within each of the 6 axes, z-score indicators globally and average
-   them into a single 0–1 axis score per country (after rank- or
-   percentile-normalising so the average isn't distorted by outliers).
-   Reverse-code where higher = worse (e.g. neopatrimonialism, vote
-   buying).
-3. Build the 6-dim country profile vector and the 4 stakeholder
-   preference vectors from Table 1.1 (binary: x → 1, blank → 0).
-4. Score each country on cosine similarity to each stakeholder
-   preference vector. The 4 similarities are interpretable as "how
-   much does country C's institutional bundle look like the world a
-   {magician|workhorse|rentier|powerbroker} would build."
-5. Optionally renormalise the 4 scores to sum to 1 to read them as a
-   stakeholder share — explicit caveat that this is a similarity-based
-   approximation, not a direct measure of who actually holds power.
-6. Rank countries within each stakeholder type to find archetypal
-   examples. Spot-check against PSW's per-country rents-space estimates
-   (Liberia, Bangladesh, Cambodia, Ghana, India, Malawi, Malaysia,
-   Rwanda, Thailand, Uganda) which are listed in the OUP book chapters.
+## Deals-space indicators (partial — only openness)
 
-Output: a country × {magician, workhorse, rentier, powerbroker}
-similarity matrix, plus the underlying 6-axis country profile.
+PSW's deals-space concepts are not well-served by V-Dem. We report
+what we can on openness with explicit caveats and **omit the order
+axis entirely** — V-Dem has no indicator of whether deals survive
+political shifts, only proxies for current rule-of-law quality.
 
-## On NMF / archetype analysis (the "design b" alternative)
+**Openness** — action-based vs identity-based access to state-firm
+deals. Two indicators:
+- `v2clrspct` — rigorous and impartial public administration
+  (codebook explicitly cites "nepotism, cronyism, discrimination" as
+  the failure mode). High = action-based access.
+- `v2dlencmps` — particularistic vs public-goods spending mix. High =
+  public-goods (action-based fiscal allocation).
 
-Both are unsupervised dimension-reduction methods that give more
-interpretable factors than PCA when the data is non-negative or you
-want a "shares-of-types" interpretation.
+Dropped from earlier drafts: political-openness indicators
+(`v2psoppaut`, `v2psparban`) are about who can run for office, not
+who can do business with the state — they belong to settlement.
+Petty corruption (`v2excrptps`) is conceptually ambiguous: it can
+mean "anyone with money can transact" (open and disordered) rather
+than "closed identity-based dealing", so we don't commit to a sign.
 
-- **NMF (non-negative matrix factorisation):** factorise the
-  country × axis matrix `M ≈ W × H`, with `W` (country × k) and `H`
-  (k × axis) both constrained to be non-negative. Each row of `H` is a
-  latent "ideal type" expressed as a non-negative loading on the 6
-  axes; each row of `W` is a country's loading on the k types. With
-  k = 4 you'd ask: do the four `H` rows resemble PSW's four preference
-  vectors? Non-negativity is what makes the factors interpretable as
-  additive types rather than the abstract orthogonal axes you get from
-  PCA.
+**Order** — would-be measures (`v2juhccomp`, `v2juhcind`,
+`v2exrescon`) capture *current* executive discipline, not
+inter-temporal durability of state-firm commitments. PSW's "ordered"
+deal is one that survives political shifts; V-Dem doesn't measure
+that. Use PRS ICRG contract-viability or ICSID arbitration data if
+this dimension matters.
 
-- **Archetype analysis (Cutler & Breiman 1994):** finds k extreme
-  points ("archetypes") that lie on the convex hull of the data, and
-  represents every country as a convex combination of those archetypes
-  (weights non-negative, summing to 1). So instead of an institutional
-  PCA score, you get a country's mix — e.g. "Bangladesh: 55% magician,
-  30% workhorse, 10% rentier, 5% powerbroker." This maps almost
-  literally onto the "stakeholder bargaining mix" interpretation
-  above. Archetype analysis is more natural than NMF for that
-  storyline because the weights are already a probability simplex.
+## Political-settlement indicators (vertical × horizontal)
 
-Either is the *unsupervised* version of design (a): instead of
-imposing PSW's preference vectors and scoring countries against them,
-you let the data tell you which 4 stakeholder profiles best span the
-observed institutional space and check whether they coincide with
-PSW's. If they do, the typology has empirical support; if they don't,
-the deviations are themselves the finding.
+V-Dem operationalises both axes cleanly. Three indicators per axis,
+all reverse-coded so high = concentration:
 
-For now we'll build (a) first, since the goal is descriptive
-country-rating rather than typology validation.
+**Horizontal — concentration among political groups** (high = ONE
+dominant group with institutional control):
+- `v2psoppaut` — opposition parties autonomy (flipped)
+- `v2lgoppart` — legislature opposition oversight (flipped)
+- `v2x_jucon` — judicial constraints on executive (flipped)
+
+**Vertical — elite-mass concentration** (high = elite monopoly,
+mass voice negligible):
+- `v2pepwrses` — power distributed by socioeconomic position (flipped)
+- `v2xeg_eqaccess` — equal access to power across groups (flipped)
+- `v2cseeorgs` — CSO entry and exit, low gov control = mass voice (flipped)
+
+The 2×2 yields four types: dominant party (high horizontal, high
+vertical), vulnerable authoritarian coalition (high horizontal, low
+vertical), weak dominant party (low horizontal, high vertical),
+competitive clientelist (low/low).
+
+## Country profiles
+
+Six-to-twelve focus countries chosen to span the four political-
+settlement quadrants, the four deals-space quadrants, and a range
+of rents-space stakeholder satisfactions. Current set:
+USA, DEU, CHN, VNM, KHM, BDI, SAU, BGD, RWA, IND, RUS, MEX.
+
+## Resource rents as context
+
+Total natural resource rents (% GDP), `wdi_ny_gdp_totl_rt_zs`, is
+included as context for interpreting the rents-space read but is
+*not* folded into any of the three composites. Latest non-NA value
+since 2010 per country (so Eritrea uses 2011 data, Venezuela 2014).

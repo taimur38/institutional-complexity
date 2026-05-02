@@ -1,0 +1,974 @@
+---
+title: "Deals and Development: Stakeholder Profiles from Institutional Data"
+subtitle: "Mapping V-Dem and QoG indicators to the Pritchett-Sen-Werker typology"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 6.5
+    fig_height: 4.5
+    latex_engine: pdflatex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+# Framing
+
+Pritchett, Sen & Werker (2018, *Deals and Development*, OUP) classify firms
+on two axes — target market (export vs. domestic) × source of profit
+(regulatory rents vs. market competition) — yielding four stakeholder
+types: **magicians** (export, competitive), **workhorses** (domestic,
+competitive), **rentiers** (export, regulatory rents), and
+**powerbrokers** (domestic, regulatory rents). Each type demands a
+different policy bundle along six axes (Table 1.1, p. 22):
+
+|                  | Transp. rules | Common infra | Special. infra | Contract enf. | Subsidies | Exclusivity |
+| ---------------- | :-----------: | :----------: | :------------: | :-----------: | :-------: | :---------: |
+| **Magicians**    |       x       |       x      |        x       |       x       |     x     |             |
+| **Workhorses**   |       x       |       x      |                |       x       |           |             |
+| **Rentiers**     |               |              |        x       |       x       |     x     |      x      |
+| **Powerbrokers** |               |              |                |               |           |      x      |
+
+We treat realised institutional outcomes as **revealed bargaining power**:
+a country whose institutions strongly supply the policy bundle a
+stakeholder demands is one where that stakeholder has been winning. The
+deliverable is a country-by-stakeholder fit score, interpreted as a
+qualitative read on which coalition has shaped each country's
+institutional landscape.
+
+```{r packages}
+library(tidyverse)
+library(arrow)
+library(countrycode)
+library(ggrepel)
+library(knitr)
+library(tidytext)  # reorder_within, scale_y_reordered
+
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
+```
+
+# Data
+
+## V-Dem and macro panel
+
+```{r load-vdem, cache=TRUE}
+vdem_raw <- read_parquet("data/shared-data/vdem/vdem.parquet")
+
+latest_year <- vdem_raw %>%
+  filter(year >= 2020) %>%
+  group_by(year) %>%
+  summarise(n_countries = n_distinct(country_name), .groups = "drop") %>%
+  filter(n_countries >= 150) %>%
+  pull(year) %>% max()
+
+cat("Latest V-Dem year:", latest_year, "\n")
+```
+
+```{r indicator-map}
+indicator_map <- tribble(
+  ~axis,                    ~indicator,                ~source, ~sign,
+  # Axis 1: transparent rules
+  "transparent_rules",      "v2cltrnslw",              "vdem",   1,
+  "transparent_rules",      "v2clrspct",               "vdem",   1,
+  # Axis 2: common infrastructure
+  "common_infra",           "v2dlencmps",              "vdem",   1,
+  "common_infra",           "wdi_eg_elc_accs_zs",      "macro",  1,
+  "common_infra",           "wdi_sh_h2o_basw_zs",      "macro",  1,
+  # Axis 3: specialized infrastructure
+  "specialized_infra",      "wdi_lp_lpi_infr_xq",      "macro",  1,
+  "specialized_infra",      "wdi_is_shp_gcnw_xq",      "macro",  1,
+  "specialized_infra",      "wdi_gb_xpd_rsdv_gd_zs",   "macro",  1,
+  "specialized_infra",      "wdi_tx_val_tech_mf_zs",   "macro",  1,
+  # Axis 4: contract enforcement
+  "contract_enforcement",   "v2xcl_prpty",             "vdem",   1,
+  "contract_enforcement",   "v2juncind",               "vdem",   1,
+  "contract_enforcement",   "v2juhcind",               "vdem",   1,
+  "contract_enforcement",   "v2juhccomp",              "vdem",   1,
+  "contract_enforcement",   "v2jucorrdc",              "vdem",   1,
+  "contract_enforcement",   "v2juaccnt",               "vdem",   1,
+  # Axis 5: subsidies / clientelism (high score = MORE clientelism supplied).
+  # v2psprlnks and v2elvotbuy are inputs to v2xnp_client, so we keep only the
+  # composite plus the orthogonal v2dlencmps spending-mix indicator.
+  "subsidies_clientelism",  "v2xnp_client",            "vdem",   1,
+  "subsidies_clientelism",  "v2dlencmps",              "vdem",  -1,  # higher = public goods
+  # Axis 6: exclusivity / barriers to entry (high = MORE exclusivity supplied).
+  # Market-side only; political-exclusivity V-Dem indicators dropped.
+  "exclusivity",            "qog_fi_reg",              "macro", -1,  # higher Fraser = less regulation
+  "exclusivity",            "qog_bti_mo",              "macro", -1   # higher = better-organised market
+)
+
+axis_levels <- c("transparent_rules", "common_infra", "specialized_infra",
+                 "contract_enforcement", "subsidies_clientelism", "exclusivity")
+axis_labels <- c("Transparent\nrules", "Common\ninfra", "Specialized\ninfra",
+                 "Contract\nenforcement", "Subsidies /\nclientelism", "Exclusivity")
+names(axis_labels) <- axis_levels
+
+kable(
+  indicator_map %>% count(axis) %>% mutate(axis = factor(axis, levels = axis_levels)) %>%
+    arrange(axis),
+  col.names = c("Axis", "# indicators"),
+  caption = "Indicators per policy-demand axis"
+)
+```
+
+```{r pull-vdem}
+vdem_cols <- indicator_map %>% filter(source == "vdem") %>% pull(indicator) %>% unique()
+
+vdem_latest <- vdem_raw %>%
+  filter(year == latest_year) %>%
+  select(country_name, iso3 = country_text_id, all_of(vdem_cols))
+```
+
+```{r pull-macro, cache=TRUE}
+macro_cols <- indicator_map %>% filter(source == "macro") %>% pull(indicator) %>% unique()
+
+macro <- read_parquet(
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", all_of(macro_cols))
+)
+
+# For each macro indicator, take the most recent non-NA value within the
+# six years ending at latest_year.
+window <- seq(latest_year - 5, latest_year)
+
+pick_latest <- function(col) {
+  macro %>%
+    filter(year %in% window, !is.na(.data[[col]])) %>%
+    group_by(countrycodeiso) %>%
+    slice_max(year, n = 1, with_ties = FALSE) %>%
+    ungroup() %>%
+    transmute(iso3 = countrycodeiso, !!col := .data[[col]])
+}
+
+macro_latest <- map(macro_cols, pick_latest) %>%
+  reduce(full_join, by = "iso3")
+```
+
+```{r combine}
+panel <- vdem_latest %>%
+  left_join(macro_latest, by = "iso3") %>%
+  filter(!is.na(country_name))
+
+cat("Panel:", nrow(panel), "countries ×",
+    length(c(vdem_cols, macro_cols)), "indicators\n")
+```
+
+# Axis construction
+
+For each of the six policy demands we pick a small basket of V-Dem
+and QoG/macro indicators. The construction recipe is the same for every
+axis:
+
+1. **Percentile-rank globally.** Each indicator is converted to its
+   percentile within the country panel, putting it on `[0, 1]` regardless
+   of the original scale (V-Dem ordinal, QoG continuous, WDI in raw
+   units, etc.). This avoids letting a single wide-ranged variable
+   dominate the average.
+2. **Sign-flip where needed.** Some indicators are coded so that higher
+   values mean *less* of the demand being supplied (e.g. V-Dem's
+   `v2psparban` runs from 0 = "parties banned" up to 4 = "no party ban",
+   so high values mean *less* exclusivity). Those get flipped to
+   `1 - pct` before averaging.
+3. **Mean within axis.** The axis score is the unweighted mean of
+   indicator scores. Missing values are dropped from the mean, so a
+   country with partial coverage still gets scored on what's available.
+
+The result is a country × 6-axis matrix on `[0, 1]` where higher = the
+country supplies more of what that policy demand is asking for.
+
+```{r axis-helpers}
+gloss <- c(
+  v2cltrnslw            = "Transparent laws with predictable enforcement",
+  v2clrspct             = "Rigorous and impartial public administration",
+  v2dlencmps            = "Particularistic vs. public-goods spending",
+  wdi_eg_elc_accs_zs    = "Electricity access (% pop.)",
+  wdi_sh_h2o_basw_zs    = "Basic drinking water access (% pop.)",
+  wdi_lp_lpi_infr_xq    = "Logistics Performance Index — infrastructure",
+  wdi_is_shp_gcnw_xq    = "Liner Shipping Connectivity Index",
+  wdi_gb_xpd_rsdv_gd_zs = "R&D expenditure (% GDP)",
+  wdi_tx_val_tech_mf_zs = "High-tech exports (% manufactured exports)",
+  v2xcl_prpty           = "Property rights (V-Dem composite of men's and women's property rights)",
+  v2juncind             = "Lower court independence",
+  v2juhcind             = "High court independence",
+  v2juhccomp            = "Government compliance with high-court rulings",
+  v2jucorrdc            = "Judicial bribery (V-Dem coding: high = less bribery)",
+  v2juaccnt             = "Judicial accountability for misconduct",
+  v2xnp_client          = "Clientelism index (V-Dem composite)",
+  qog_fi_reg            = "Fraser regulation index (high = less regulation)",
+  qog_bti_mo            = "BTI organisation of market and competition"
+)
+
+axis_table <- function(ax) {
+  indicator_map %>%
+    filter(axis == ax) %>%
+    transmute(
+      Indicator = indicator,
+      Source    = ifelse(source == "vdem", "V-Dem", "QoG/macro"),
+      Direction = ifelse(sign == 1, "+", "- (flipped)"),
+      Gloss     = gloss[indicator]
+    ) %>%
+    kable()
+}
+```
+
+## Transparent rules
+
+PSW define this as predictable, publicly known regulation — firms can
+plan based on rules they can read, not deals they have to negotiate.
+We use two complementary V-Dem indicators that capture the law-on-paper
+and the law-in-practice:
+
+- **`v2cltrnslw` — Transparent laws with predictable enforcement.**
+  V-Dem question: *"Are the laws of the land clear, well publicized,
+  coherent (consistent with each other), relatively stable from year
+  to year, and enforced in a predictable manner?"* Ordinal 0–4,
+  converted to interval by V-Dem's measurement model: 0 =
+  "Transparency and predictability are almost non-existent. The laws
+  of the land are created and/or enforced in completely arbitrary
+  fashion." through 4 = "Transparency and predictability are very
+  strong. The laws of the land are created and enforced in a
+  non-arbitrary fashion." This is about the *quality and coherence of
+  the legal code itself* — whether the rules are knowable and stable.
+
+- **`v2clrspct` — Rigorous and impartial public administration.**
+  V-Dem question: *"Are public officials rigorous and impartial in
+  the performance of their duties?"* The codebook clarifies that
+  "this question focuses on the extent to which public officials
+  generally abide by the law and treat like cases alike, or
+  conversely, the extent to which public administration is
+  characterized by arbitrariness and biases (i.e., nepotism,
+  cronyism, or discrimination)." Ordinal 0–4 (interval after the
+  measurement model): 0 = "The law is not respected by public
+  officials. Arbitrary or biased administration of the law is
+  rampant." through 4 = "The law is generally fully respected by the
+  public officials. Arbitrary or biased administration of the law is
+  very limited." This captures the *bureaucratic* face of the same
+  concept — street-level impartiality.
+
+A country could have clear laws applied corruptly (high `v2cltrnslw`,
+low `v2clrspct`) or murky laws applied conscientiously, so both are
+needed. Both run positively; no sign-flipping.
+
+```{r ax-tab-transparent}
+axis_table("transparent_rules")
+```
+
+## Common infrastructure
+
+The PSW demand is for the public goods every firm benefits from —
+electricity, water, basic education, transport. We pair one V-Dem
+fiscal-intent indicator with two WDI outcome variables that have
+near-universal coverage:
+
+- **`v2dlencmps` — Particularistic vs. public-goods spending.**
+  V-Dem question: *"Considering the profile of social and
+  infrastructural spending in the national budget, how
+  'particularistic' or 'public goods' are most expenditures?"* The
+  codebook clarifies that "particularistic spending is narrowly
+  targeted on a specific corporation, sector, social group, region,
+  party, or set of constituents… Public-goods spending is intended
+  to benefit all communities within a society." Ordinal 0–4
+  (interval after the measurement model), running from 0 = "Almost
+  all of the social and infrastructure expenditures are
+  particularistic" to 4 = "Almost all social and infrastructure
+  expenditures are public-goods in character." Higher = more
+  public-goods spending mix; this is the *fiscal intent* side of
+  common-infra supply.
+
+- **`wdi_eg_elc_accs_zs`** — share of population with access to
+  electricity.
+
+- **`wdi_sh_h2o_basw_zs`** — share of population with access to at
+  least basic drinking water.
+
+The two WDI variables capture realised supply of universal
+infrastructure with broad country coverage. (Earlier drafts also
+included secondary enrolment and PWT human capital, which we drop
+here in favour of indicators more directly about physical-network
+infrastructure rather than human capital.) All three run positively.
+
+```{r ax-tab-common}
+axis_table("common_infra")
+```
+
+## Specialized infrastructure
+
+This is the demand for sector-specific public investment that
+benefits a subset of firms — special economic zones, port facilities,
+R&D infrastructure, regulatory bodies that handle complex industries.
+V-Dem doesn't capture this directly, so we lean entirely on
+outcome-side proxies. `wdi_lp_lpi_infr_xq` (Logistics Performance
+Index — infrastructure) and `wdi_is_shp_gcnw_xq` (Liner Shipping
+Connectivity Index) measure trade-enabling specialized
+infrastructure; `wdi_gb_xpd_rsdv_gd_zs` (R&D as % GDP) and
+`wdi_tx_val_tech_mf_zs` (high-tech export share) proxy R&D
+infrastructure and its outputs. We deliberately exclude the Atlas
+complexity indices (ECI, COI) here: they are downstream *outcomes*
+of specialized infrastructure rather than a measure of the
+institutional supply, and including them would risk circularity in
+later sanity checks against complexity. All four run positively;
+coverage is patchier than the other axes.
+
+```{r ax-tab-specialized}
+axis_table("specialized_infra")
+```
+
+## Contract enforcement
+
+Courts that resolve commercial disputes predictably and protect
+property. V-Dem has the strongest battery here. We checked whether
+the property-rights composite already aggregates the judicial
+indicators and could replace them: it does not. `v2xcl_prpty` is
+built only from `v2clprptym` (men's property rights) and
+`v2clprptyw` (women's property rights), with no judicial inputs.
+Conversely the judicial battery feeds into `v2x_jucon` (judicial
+constraints on the executive) and `v2x_rule`, neither of which we
+use. So property rights and the judicial battery are non-redundant
+and both are kept.
+
+- **`v2xcl_prpty`** — V-Dem property-rights composite (men's and
+  women's de facto rights to acquire, possess, inherit, and sell
+  private property).
+- **`v2juncind`** and **`v2juhcind`** — independence of lower courts
+  and the high court from political pressure.
+- **`v2juhccomp`** — government compliance with high-court rulings,
+  the most demanding test of judicial enforcement (does the executive
+  *actually* abide by rulings it dislikes).
+- **`v2jucorrdc`** — judicial bribery; V-Dem's ordinal coding runs
+  from "Always" (low) to "Never" (high), so high = less bribery and
+  no flip is needed.
+- **`v2juaccnt`** — accountability of judges who engage in
+  misconduct.
+
+All six run positively.
+
+```{r ax-tab-contract}
+axis_table("contract_enforcement")
+```
+
+## Subsidies / clientelism
+
+PSW define "subsidies" broadly to include directed credit, tax breaks,
+and any state transfer that benefits specific firms or coalitions
+rather than the economy at large. The unifying logic is
+particularistic distribution.
+
+- **`v2xnp_client` — Clientelism Index.** A V-Dem Bayesian factor
+  composite of how much politics is built on the targeted, contingent
+  distribution of resources (goods, services, jobs, money) in
+  exchange for political support. The codebook flags that this
+  composite is built from inputs that include `v2psprlnks` (party
+  linkages) and `v2elvotbuy` (vote buying) directly. For that reason
+  we drop those two as separate axis components — keeping them
+  alongside `v2xnp_client` would double-count their signal. Higher
+  score = more clientelism.
+
+- **`v2dlencmps`** (flipped) — the same particularistic-vs-public-goods
+  budget-mix variable used in Axis 2. Flipped here so that *higher*
+  reflects more particularistic spending. This complements
+  `v2xnp_client` by capturing the *fiscal* face of clientelism rather
+  than the political-relationships face, and is not an input to the
+  composite.
+
+The axis score is high when both political relationships and fiscal
+spending flow through targeted, particularistic channels.
+
+```{r ax-tab-subsidies}
+axis_table("subsidies_clientelism")
+```
+
+## Exclusivity
+
+Barriers to entry, licensing regimes, regulatory rents that protect
+incumbents. We narrow this axis to the *market-side* face of
+exclusivity, dropping the political-exclusivity V-Dem indicators
+(`v2x_neopat`, `v2psparban`, `v2psoppaut`) used in earlier drafts.
+That is a deliberate scope decision — the kept indicators are
+clean, well-coded, and squarely about market entry, but they cannot
+distinguish open-market/closed-politics regimes (e.g. Singapore-type)
+from open-market/open-politics regimes. A reader interested in the
+political face of exclusivity should consult the V-Dem indicators
+separately. Both kept indicators are flipped so that higher = more
+exclusivity:
+
+- **`qog_fi_reg`** — Fraser Institute composite of business, credit,
+  and labour-market regulation. The Fraser coding has *higher*
+  scores for *less* restrictive regulation, so we flip: higher in
+  our axis = more restrictive regulation, more exclusivity.
+- **`qog_bti_mo`** — Bertelsmann Transformation Index "Organisation
+  of the market and competition." Higher BTI = a more competitive,
+  open-market environment, so we flip: higher in our axis = a more
+  closed/captured market environment.
+
+The axis score is high when the regulatory environment favours
+incumbents over entrants.
+
+```{r ax-tab-exclusivity}
+axis_table("exclusivity")
+```
+
+# Structural variable — resource rents
+
+The rentier and powerbroker stakeholder types both profit from
+regulatory rents and demand near-identical policy bundles; what
+distinguishes them is whether the rent-seeking sector is export-facing
+(rentiers: oil, mining, plantations) or domestic (powerbrokers: telco,
+banking, state contracts). The institutional indicators alone cannot
+separate them. Following PSW's own use of sector size to make this
+distinction, we pull **total natural resource rents as % of GDP**
+(WDI `NY.GDP.TOTL.RT.ZS`, summing oil, gas, coal, mineral and forest
+rents) and fold it directly into the fit calculation below as a
+multiplicative weight on the rentier and powerbroker columns.
+
+```{r resource-rents}
+# Resource rents move slowly (it's a structural feature of the economy),
+# so we grab the latest available value since 2010 rather than the tight
+# window we use for institutional indicators. This recovers Venezuela
+# (2014), Eritrea (2011), South Sudan (2015), Syria (2020) and others
+# whose WDI series stopped being reported in recent years.
+rent_latest <- read_parquet(
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", "wdi_ny_gdp_totl_rt_zs")
+) %>%
+  filter(!is.na(wdi_ny_gdp_totl_rt_zs), year >= 2010) %>%
+  group_by(countrycodeiso) %>% slice_max(year, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(iso3 = countrycodeiso,
+            resource_rents_pct_gdp = wdi_ny_gdp_totl_rt_zs,
+            resource_rents_year    = year)
+
+cat("Countries with resource-rents data:", nrow(rent_latest), "\n")
+cat("Year coverage:\n")
+print(table(rent_latest$resource_rents_year))
+```
+
+# Axis scoring
+
+```{r score-axes}
+percentile_rank <- function(x) {
+  r <- rank(x, na.last = "keep")
+  r / sum(!is.na(x))
+}
+
+# Score every indicator
+indicator_scores <- panel %>%
+  pivot_longer(c(-country_name, -iso3),
+               names_to = "indicator", values_to = "value") %>%
+  inner_join(indicator_map, by = "indicator") %>%
+  group_by(indicator) %>%
+  mutate(pct = percentile_rank(value)) %>%
+  ungroup() %>%
+  mutate(score = ifelse(sign == 1, pct, 1 - pct))
+
+# Average within axis (drop NA so countries with partial coverage still score)
+axis_scores <- indicator_scores %>%
+  group_by(country_name, iso3, axis) %>%
+  summarise(axis_score = mean(score, na.rm = TRUE),
+            n_indicators = sum(!is.na(score)),
+            .groups = "drop")
+
+# Coverage: keep countries with at least 1 non-NA indicator on every axis
+ok_countries <- axis_scores %>%
+  group_by(country_name) %>%
+  summarise(min_n = min(n_indicators), .groups = "drop") %>%
+  filter(min_n >= 1) %>% pull(country_name)
+
+axis_scores <- axis_scores %>% filter(country_name %in% ok_countries)
+
+axis_wide <- axis_scores %>%
+  select(country_name, iso3, axis, axis_score) %>%
+  pivot_wider(names_from = axis, values_from = axis_score) %>%
+  select(country_name, iso3, all_of(axis_levels))
+
+cat("Countries with full axis coverage:", nrow(axis_wide), "\n")
+```
+
+# Stakeholder fit scores
+
+```{r psw-prefs}
+psw_prefs <- tribble(
+  ~stakeholder,
+  ~transparent_rules, ~common_infra, ~specialized_infra,
+  ~contract_enforcement, ~subsidies_clientelism, ~exclusivity,
+  "Magicians",    1, 1, 1, 1, 1, 0,
+  "Workhorses",   1, 1, 0, 1, 0, 0,
+  "Rentiers",     0, 0, 1, 1, 1, 1,
+  "Powerbrokers", 0, 0, 0, 0, 0, 1
+)
+
+stakeholder_levels <- c("Magicians", "Workhorses", "Rentiers", "Powerbrokers")
+
+pref_mat <- psw_prefs %>% column_to_rownames("stakeholder") %>% as.matrix()
+profile_mat <- axis_wide %>% column_to_rownames("country_name") %>%
+  select(-iso3) %>% as.matrix()
+```
+
+For each country and each stakeholder, the **institutional fit** is the
+average of the country's axis scores over the axes that stakeholder
+demands. Equivalently: "out of 1, how well does this country supply
+what stakeholder X is asking for." We then apply the structural
+adjustment described above — multiplying the rentier column by the
+country's percentile-ranked resource rents / GDP, and the powerbroker
+column by its complement — so that countries with sizeable export-rent
+sectors carry rentier mass and resource-poor countries with the same
+exclusivity profile concentrate on powerbrokers. Magicians and
+workhorses are not adjusted; the export-vs-domestic split for the
+market-competition stakeholders is left to the institutional axes
+(no clean structural variable for non-resource competitive exports).
+Finally we renormalise the four adjusted scores to sum to 1 to read
+them as *stakeholder shares*.
+
+The share interpretation has a built-in caveat. The four preference
+vectors overlap (e.g., contract enforcement is wanted by everyone except
+powerbrokers), so the share isn't a clean decomposition — it's a
+similarity-based approximation of which stakeholder profile a country's
+institutions most resemble.
+
+```{r fit-scores}
+# 1. Institutional-only fit: average of axis scores over demanded axes
+fit_mat_inst <- profile_mat %*% t(pref_mat) /
+  matrix(rowSums(pref_mat),
+         nrow = nrow(profile_mat),
+         ncol = nrow(pref_mat),
+         byrow = TRUE)
+
+# 2. Structural adjustment for rentier/powerbroker.
+# Percentile-rank resource rents/GDP across countries with axis coverage.
+rents_keyed <- tibble(country_name = rownames(fit_mat_inst)) %>%
+  left_join(axis_wide %>% select(country_name, iso3), by = "country_name") %>%
+  left_join(rent_latest, by = "iso3") %>%
+  mutate(
+    rents_pct = percentile_rank(resource_rents_pct_gdp),
+    # Countries missing rents data get neutral weight (0.5)
+    rents_pct = ifelse(is.na(rents_pct), 0.5, rents_pct)
+  )
+
+fit_mat <- fit_mat_inst
+fit_mat[, "Rentiers"]     <- fit_mat_inst[, "Rentiers"]     * rents_keyed$rents_pct
+fit_mat[, "Powerbrokers"] <- fit_mat_inst[, "Powerbrokers"] * (1 - rents_keyed$rents_pct)
+
+# 3. Renormalise rows to sum to 1
+fit_shares <- fit_mat / rowSums(fit_mat)
+
+fit_long <- as_tibble(fit_mat, rownames = "country_name") %>%
+  pivot_longer(-country_name, names_to = "stakeholder", values_to = "fit") %>%
+  left_join(
+    as_tibble(fit_shares, rownames = "country_name") %>%
+      pivot_longer(-country_name, names_to = "stakeholder", values_to = "share"),
+    by = c("country_name", "stakeholder")
+  ) %>%
+  left_join(
+    as_tibble(fit_mat_inst, rownames = "country_name") %>%
+      pivot_longer(-country_name, names_to = "stakeholder", values_to = "fit_inst"),
+    by = c("country_name", "stakeholder")
+  ) %>%
+  mutate(stakeholder = factor(stakeholder, levels = stakeholder_levels)) %>%
+  left_join(axis_wide %>% select(country_name, iso3), by = "country_name") %>%
+  left_join(rent_latest, by = "iso3")
+
+# Country labels reused across plots
+label_set <- c("USA", "DEU", "JPN", "KOR", "CHN", "VNM", "BGD", "KHM",
+               "MYS", "IND", "MEX", "TUR", "BRA", "RUS", "SAU", "VEN",
+               "AGO", "NGA", "ETH", "RWA", "LBR", "MAR")
+```
+
+## Top countries by stakeholder fit
+
+```{r top-by-stakeholder, fig.width=6.5, fig.height=8.5}
+top15 <- fit_long %>%
+  group_by(stakeholder) %>%
+  slice_max(fit, n = 15) %>%
+  ungroup() %>%
+  mutate(country_name = reorder_within(country_name, fit, stakeholder))
+
+ggplot(top15, aes(x = fit, y = country_name, fill = stakeholder)) +
+  geom_col() +
+  facet_wrap(~ stakeholder, scales = "free_y", ncol = 2) +
+  scale_y_reordered() +
+  labs(x = "Fit score (mean of demanded-axis scores)",
+       y = NULL,
+       title = "Top 15 countries by stakeholder fit",
+       subtitle = paste0("Higher fit = institutions supply more of what stakeholder demands. ",
+                         "V-Dem ", latest_year, "."))
+```
+
+```{r top-tables}
+top10_table <- fit_long %>%
+  group_by(stakeholder) %>%
+  slice_max(fit, n = 10) %>%
+  mutate(rank = row_number(),
+         entry = sprintf("%s (%.2f)", country_name, fit)) %>%
+  ungroup() %>%
+  select(rank, stakeholder, entry) %>%
+  pivot_wider(names_from = stakeholder, values_from = entry) %>%
+  select(rank, all_of(stakeholder_levels))
+
+kable(top10_table, caption = "Top 10 country fit per stakeholder (fit score in parens)")
+```
+
+## Stakeholder profile of selected countries
+
+A few well-known cases — including those Pritchett, Sen & Werker
+themselves apply the framework to in their book (Bangladesh, Cambodia,
+Liberia, Malaysia, Rwanda) — alongside reference economies and
+resource-dependent states.
+
+```{r selected-profiles, fig.width=6.5, fig.height=5}
+selected_iso <- c("BGD", "KHM", "LBR", "MYS", "RWA",  # PSW case studies
+                  "USA", "DEU", "JPN", "KOR",          # advanced economies
+                  "CHN", "VNM", "ETH",                 # state-led
+                  "SAU", "RUS", "VEN", "AGO", "AZE",   # resource-heavy
+                  "IND", "BRA", "MEX", "TUR", "ARG",   # large EM
+                  "PAK", "MAR", "NGA")                 # other comparators
+
+selected_shares <- fit_long %>%
+  filter(iso3 %in% selected_iso) %>%
+  mutate(country_name = fct_reorder2(country_name,
+                                     stakeholder == "Magicians", share))
+
+ggplot(selected_shares, aes(x = share, y = country_name, fill = stakeholder)) +
+  geom_col() +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  scale_fill_gl() +
+  labs(x = "Stakeholder share (fit, renormalised)",
+       y = NULL,
+       fill = NULL,
+       title = "Stakeholder shares — selected countries",
+       subtitle = "Renormalised so the four stakeholder fits sum to 100% per country") +
+  theme(legend.position = "bottom")
+```
+
+## Axis profile of archetypal countries
+
+For one country at the top of each stakeholder's ranking, what does its
+6-axis institutional profile look like?
+
+```{r archetype-axes, fig.width=6.5, fig.height=4.5}
+archetypes <- fit_long %>%
+  group_by(stakeholder) %>%
+  slice_max(fit, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(stakeholder, country_name)
+
+archetype_axes <- axis_scores %>%
+  inner_join(archetypes, by = "country_name") %>%
+  mutate(axis = factor(axis, levels = axis_levels, labels = axis_labels[axis_levels]),
+         stakeholder = factor(stakeholder, levels = stakeholder_levels)) %>%
+  mutate(label = paste0(country_name, "\n(", stakeholder, ")"))
+
+# Order facet labels by stakeholder
+archetype_axes <- archetype_axes %>%
+  mutate(label = factor(label,
+                        levels = archetype_axes %>%
+                          distinct(stakeholder, label) %>%
+                          arrange(stakeholder) %>% pull(label)))
+
+ggplot(archetype_axes, aes(x = axis, y = axis_score, group = label)) +
+  geom_col(aes(fill = stakeholder)) +
+  facet_wrap(~ label, ncol = 2) +
+  scale_fill_gl() +
+  scale_y_continuous(limits = c(0, 1), labels = scales::percent_format(accuracy = 1)) +
+  labs(x = NULL, y = "Axis score (percentile)",
+       fill = NULL,
+       title = "Six-axis institutional profile of each archetype",
+       subtitle = "Top-ranked country on each stakeholder's fit score") +
+  theme(legend.position = "none",
+        axis.text.x = element_text(size = 7))
+```
+
+# Diagnostic: why the structural adjustment matters
+
+Before the rents adjustment, the institutional fit alone fails to
+separate rentier-leaning from powerbroker-leaning countries — the
+demanded policy bundles overlap heavily on exclusivity, and
+powerbroker fit reduces mechanically to the exclusivity score. The
+following 2×2 plots the *institutional-only* powerbroker fit (i.e.
+`fit_inst`, before applying the rents weight) against resource rents
+/ GDP. Countries in the top-right have high institutional powerbroker
+fit *and* a large export-rentier sector — the rents adjustment
+reallocates their share towards rentiers. Countries in the
+bottom-right have the same institutional profile but no rent base —
+they keep their share on powerbrokers.
+
+```{r pb-vs-rents, fig.width=6.5, fig.height=5}
+pb_rents <- fit_long %>%
+  filter(stakeholder == "Powerbrokers") %>%
+  filter(!is.na(resource_rents_pct_gdp))
+
+pb_cut   <- median(pb_rents$fit_inst, na.rm = TRUE)
+rent_cut <- 5
+
+ggplot(pb_rents, aes(x = fit_inst, y = resource_rents_pct_gdp)) +
+  geom_vline(xintercept = pb_cut, linetype = "dashed", alpha = 0.4) +
+  geom_hline(yintercept = rent_cut, linetype = "dashed", alpha = 0.4) +
+  geom_point(alpha = 0.5) +
+  geom_text_repel(
+    data = ~ filter(.x, iso3 %in% label_set |
+                         resource_rents_pct_gdp > 15 |
+                         (fit_inst > quantile(fit_inst, 0.85, na.rm = TRUE) &
+                          resource_rents_pct_gdp > rent_cut)),
+    aes(label = iso3), size = 2.8, max.overlaps = 30
+  ) +
+  scale_y_continuous(limits = c(0, NA)) +
+  labs(x = "Powerbroker fit (institutional only, pre-adjustment)",
+       y = "Total natural resource rents (% GDP)",
+       title = "Diagnostic: institutional fit alone collapses powerbroker and rentier",
+       subtitle = paste0("Top-right cases shift toward rentier under the structural ",
+                         "adjustment; bottom-right stay on powerbroker."))
+```
+
+```{r pb-rents-table}
+pb_rents %>%
+  mutate(
+    quadrant = case_when(
+      fit_inst >= pb_cut & resource_rents_pct_gdp >= rent_cut ~ "Reallocated to rentier",
+      fit_inst >= pb_cut & resource_rents_pct_gdp <  rent_cut ~ "Stays on powerbroker",
+      fit_inst <  pb_cut & resource_rents_pct_gdp >= rent_cut ~ "Resource-rich, weak powerbroker fit",
+      TRUE                                                     ~ "Magician/workhorse territory"
+    )
+  ) %>%
+  count(quadrant, name = "n_countries") %>%
+  arrange(desc(n_countries)) %>%
+  kable(caption = "Country count by quadrant (using institutional-only PB fit)")
+```
+
+## Spider plot: Burundi vs Cambodia
+
+A radar plot summarising the four-stakeholder share profile. Burundi
+and Cambodia look almost identical on institutional fit (both
+high-powerbroker, modest-rentier), but the integrated calculation
+splits them cleanly: Burundi's 14% resource-rents/GDP pulls its share
+toward rentiers, Cambodia's 0.8% pulls it toward powerbrokers. Axes
+are arranged to preserve the PSW 2×2: market-competition stakeholders
+(magicians, workhorses) at top, regulatory-rents stakeholders
+(powerbrokers, rentiers) at bottom; export-facing types (magicians,
+rentiers) on the left, domestic types (workhorses, powerbrokers) on
+the right.
+
+```{r country-spider, fig.width=6.5, fig.height=5}
+spider_order <- c("Magicians", "Workhorses", "Powerbrokers", "Rentiers")
+focus_iso    <- c("BDI", "KHM")
+
+# Angular positions (radians, measured CCW from positive x-axis), arranged
+# so factor levels go clockwise starting at the top.
+n_axes <- length(spider_order)
+axes_df <- tibble(
+  stakeholder = factor(spider_order, levels = spider_order),
+  angle       = pi/2 - 2 * pi * (seq_len(n_axes) - 1) / n_axes
+)
+
+# Country vertices in cartesian coordinates
+spider_data <- fit_long %>%
+  filter(iso3 %in% focus_iso) %>%
+  mutate(stakeholder = factor(stakeholder, levels = spider_order)) %>%
+  inner_join(axes_df, by = "stakeholder") %>%
+  arrange(country_name, stakeholder) %>%
+  mutate(x = share * cos(angle),
+         y = share * sin(angle))
+
+# Close the polygon loop by repeating the first vertex per country
+spider_closed <- spider_data %>%
+  group_by(country_name) %>%
+  group_modify(~ bind_rows(.x, slice(.x, 1))) %>%
+  ungroup()
+
+# Concentric grid rings + axis spokes
+grid_rings <- expand_grid(r = c(0.25, 0.5, 0.75, 1.0),
+                          theta = seq(0, 2 * pi, length.out = 120)) %>%
+  mutate(x = r * cos(theta), y = r * sin(theta), grp = factor(r))
+
+axis_spokes <- axes_df %>%
+  mutate(x_end = cos(angle), y_end = sin(angle))
+
+axis_text <- axes_df %>%
+  mutate(x_lbl = 1.13 * cos(angle),
+         y_lbl = 1.13 * sin(angle),
+         hjust = case_when(cos(angle) >  0.3 ~ 0,
+                           cos(angle) < -0.3 ~ 1,
+                           TRUE              ~ 0.5))
+
+ring_labels <- tibble(r = c(0.25, 0.5, 0.75)) %>%
+  mutate(x = 0, y = r, label = scales::percent(r, accuracy = 1))
+
+ggplot() +
+  geom_path(data = grid_rings,
+            aes(x, y, group = grp), color = "grey85") +
+  geom_segment(data = axis_spokes,
+               aes(x = 0, y = 0, xend = x_end, yend = y_end),
+               color = "grey85") +
+  geom_polygon(data = spider_closed,
+               aes(x, y, group = country_name,
+                   fill = country_name, color = country_name),
+               alpha = 0.25, linewidth = 0.8) +
+  geom_point(data = spider_data,
+             aes(x, y, color = country_name), size = 2.4) +
+  geom_text(data = axis_text,
+            aes(x_lbl, y_lbl, label = stakeholder, hjust = hjust),
+            size = 3.5) +
+  geom_text(data = ring_labels,
+            aes(x, y, label = label),
+            size = 2.6, color = "grey55", vjust = -0.4) +
+  coord_equal(xlim = c(-1.35, 1.35), ylim = c(-1.2, 1.2), clip = "off") +
+  scale_color_gl() +
+  scale_fill_gl() +
+  labs(color = NULL, fill = NULL,
+       title = "Stakeholder share — Burundi vs Cambodia",
+       subtitle = "After the rents adjustment: Burundi tips to rentier, Cambodia to powerbroker") +
+  theme_void(base_family = ggplot2::theme_get()$text$family) +
+  theme(legend.position = "bottom",
+        plot.title = element_text(face = "bold"),
+        plot.subtitle = element_text(color = "grey30"))
+```
+
+```{r country-spider-rents}
+fit_long %>%
+  filter(iso3 %in% focus_iso, stakeholder == "Powerbrokers") %>%
+  select(country_name, resource_rents_pct_gdp) %>%
+  kable(col.names = c("Country", "Resource rents (% GDP)"),
+        digits = 1,
+        caption = "Structural variable: resource rents as % of GDP")
+```
+
+# Sanity checks
+
+## Magician fit vs. Economic Complexity
+
+If the framework holds, magician-style institutions (transparent rules,
+contract enforcement, public-goods spending) should be associated with
+diversified, sophisticated export baskets. We expect a positive but
+imperfect relationship — magician-friendly institutions are a
+*precondition* for complexity, not a mechanical determinant.
+
+```{r magician-vs-eci, fig.width=6.5, fig.height=4.5}
+eci_latest <- read_parquet(
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year", "atl_sitc_eci")
+) %>%
+  filter(!is.na(atl_sitc_eci)) %>%
+  group_by(countrycodeiso) %>% slice_max(year, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(iso3 = countrycodeiso, eci = atl_sitc_eci)
+
+magician_eci <- fit_long %>%
+  filter(stakeholder == "Magicians") %>%
+  inner_join(eci_latest, by = "iso3")
+
+ggplot(magician_eci, aes(x = fit, y = eci)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = highlight) +
+  geom_text_repel(
+    data = ~ filter(.x, iso3 %in% label_set),
+    aes(label = iso3), size = 2.8, max.overlaps = 30
+  ) +
+  labs(x = "Magician fit score",
+       y = "Economic Complexity Index (latest)",
+       title = "Magician institutions vs. economic complexity",
+       subtitle = sprintf("r = %.2f",
+                          cor(magician_eci$fit, magician_eci$eci, use = "pairwise")))
+```
+
+## Powerbroker vs. magician fit
+
+These two stakeholder types have nearly orthogonal demand vectors —
+magicians want everything except exclusivity, powerbrokers want only
+exclusivity (and benefit from the absence of everything else). Their
+fits across countries should be strongly negatively correlated.
+
+```{r mag-vs-pb, fig.width=6.5, fig.height=5}
+mag_pb <- fit_long %>%
+  filter(stakeholder %in% c("Magicians", "Powerbrokers")) %>%
+  select(country_name, iso3, stakeholder, fit) %>%
+  pivot_wider(names_from = stakeholder, values_from = fit)
+
+ggplot(mag_pb, aes(x = Magicians, y = Powerbrokers)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE, color = highlight) +
+  geom_text_repel(
+    data = ~ filter(.x, iso3 %in% label_set),
+    aes(label = iso3), size = 2.8, max.overlaps = 30
+  ) +
+  labs(x = "Magician fit", y = "Powerbroker fit",
+       title = "Powerbroker world is the inverse of magician world",
+       subtitle = sprintf("r = %.2f",
+                          cor(mag_pb$Magicians, mag_pb$Powerbrokers, use = "pairwise")))
+```
+
+# Outputs
+
+```{r write-outputs}
+fit_out <- fit_long %>%
+  select(country_name, iso3, stakeholder,
+         fit_inst, fit, share,
+         resource_rents_pct_gdp, resource_rents_year) %>%
+  arrange(country_name, stakeholder)
+
+axis_out <- axis_wide %>%
+  left_join(rent_latest, by = "iso3")
+
+dir.create("outputs", showWarnings = FALSE)
+write_csv(fit_out, "outputs/deals_stakeholder_fit.csv")
+write_csv(axis_out, "outputs/deals_axis_scores.csv")
+
+cat("Wrote: outputs/deals_stakeholder_fit.csv (",
+    nrow(fit_out), "rows)\n")
+cat("Wrote: outputs/deals_axis_scores.csv (",
+    nrow(axis_out), "rows)\n")
+```
+
+# Caveats and next steps
+
+- **The share interpretation is approximate.** Preference vectors
+  overlap (most stakeholders want contract enforcement; only powerbrokers
+  affirmatively want exclusivity), so the renormalised shares aren't a
+  proper decomposition of bargaining power — they're a similarity index
+  rescaled.
+- **Powerbroker institutional fit reduces to "high exclusivity."** With
+  only one demanded axis, the unadjusted powerbroker fit is
+  mechanically the exclusivity score. The structural adjustment using
+  resource rents / GDP fixes this in the headline shares (rentier vs
+  powerbroker now separate), but the institutional-only `fit_inst`
+  column in the output retains the mechanical equivalence and should
+  be read with that in mind.
+- **Resource-rents data is point-in-time per country.** WDI's
+  `NY.GDP.TOTL.RT.ZS` series stops being reported for several
+  rent-economies in recent years (Eritrea 2011, Venezuela 2014, South
+  Sudan 2015, Syria 2020). We pick the latest non-NA observation since
+  2010 per country and expose the year as `resource_rents_year` in the
+  output. Resource-rent shares move slowly so this is a reasonable
+  approximation; readers comparing across countries should still note
+  that Venezuela's rent share is fixed at its pre-collapse 2014 level.
+- **Magicians and workhorses are correlated by design.** They share four
+  of five demanded axes, so their rankings will track each other; the
+  separation lives almost entirely in specialized infrastructure and
+  subsidies/clientelism.
+- **No infrastructure stock data in V-Dem.** Common-infra and
+  specialized-infra rely on WDI access/quality variables, which have
+  more measurement noise and patchier coverage than V-Dem.
+- **Exclusivity is market-side only.** Dropping the V-Dem political
+  exclusivity indicators (party bans, opposition autonomy,
+  neopatrimonial rule) means the axis cannot separate
+  open-market/closed-politics regimes from open-market/open-politics
+  ones. A country with vibrant business competition but no political
+  contestability scores low on exclusivity here even though PSW would
+  read it as a powerbroker-friendly environment.
+- **PSW's per-country rents-space estimates** (e.g. Liberia ~10/25/61/3,
+  Malawi ~22/37/36/small for rentiers/powerbrokers/workhorses/magicians)
+  could serve as ground truth for a few cases. Worth a follow-up
+  comparison.
+
+The unsupervised counterpart (archetype analysis on the 6-axis matrix,
+recovering 4 latent stakeholder types from the data alone) is a
+companion exercise documented in `deals-and-development.md`.

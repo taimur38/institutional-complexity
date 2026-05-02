@@ -670,6 +670,18 @@ pca_country <- tibble(
 
 cat("Correlation between ECI (eigenvalue) and PC1:",
     round(cor(eci_eigen, pca_result$x[, 1]), 3), "\n")
+
+# Persist country PC scores for downstream analyses (e.g. deals-development.Rmd
+# uses PC2 as a "managed vs contested" settlement axis).
+pca_export <- as.data.frame(pca_result$x[, 1:5])
+pca_export$country_name <- rownames(pca_export)
+pca_export <- pca_export[, c("country_name", paste0("PC", 1:5))]
+for (k in 1:5) {
+  pca_export[[paste0("PC", k, "_pct")]] <-
+    round(ecdf(pca_export[[paste0("PC", k)]])(pca_export[[paste0("PC", k)]]) * 100, 1)
+}
+dir.create("outputs", showWarnings = FALSE)
+write.csv(pca_export, "outputs/institutional_pca_scores.csv", row.names = FALSE)
 ```
 
 ## Institution Space (Network)
