@@ -1,0 +1,1563 @@
+---
+title: "Cambodia: Growth Breaks and Institutional Position"
+subtitle: "Periodisation, sectoral trajectory, and country-space neighbours"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 6.5
+    fig_height: 4.5
+    latex_engine: xelatex
+    includes:
+      in_header: ~/dev/gl-design/skills/gl-ggplot/assets/gl_pdf.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath("../.."))
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+```{r packages, cache=FALSE}
+library(tidyverse)
+library(arrow)
+library(strucchange)
+library(readxl)
+library(ggrepel)
+library(uwot)
+library(knitr)
+library(patchwork)
+```
+
+```{r gl-setup, cache=FALSE}
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
+```
+
+```{r constants}
+ccode <- "KHM"
+cname <- "Cambodia"
+```
+
+# Periodisation: Cambodia's growth breaks
+
+We identify structural breaks in Cambodia's real GDP-per-capita growth using the
+Bai-Perron procedure on Penn World Table 11.0 and overlay the Kar et al. (2013)
+acceleration filter. The four-break solution gives the periodisation we use
+throughout this document.
+
+```{r growth-breaks-build, cache=TRUE}
+pwt <- read_excel("~/dev/political-economy-pakistan/data/pwt110.xlsx",
+                  sheet = "Data")
+
+penn_growth <- pwt %>%
+  filter(countrycode == ccode) %>%
+  transmute(year, gdp_per_cap = rgdpna / pop) %>%
+  filter(!is.na(gdp_per_cap)) %>%
+  arrange(year) %>%
+  mutate(growth_rate = (gdp_per_cap - lag(gdp_per_cap)) / lag(gdp_per_cap))
+
+start_year <- min(penn_growth$year)
+end_year   <- 2023
+n_breaks   <- 4
+
+penn_growth_ts <- ts(penn_growth$growth_rate[-1],
+                     start = start_year, end = end_year, frequency = 1)
+bp_growth    <- breakpoints(penn_growth_ts ~ 1)
+break_years  <- Filter(Negate(is.na),
+                       summary(bp_growth)$breakdates[n_breaks, ])
+
+period_growthrates <- penn_growth %>%
+  mutate(periods = cut(year,
+                       breaks = c(start_year, break_years, end_year),
+                       dig.lab = 4)) %>%
+  group_by(periods) %>%
+  summarise(avg_growth_rate = mean(growth_rate, na.rm = TRUE),
+            mdn_growth_rate = median(growth_rate, na.rm = TRUE),
+            length = n(),
+            .groups = "drop") %>%
+  mutate(start_period = as.numeric(str_match(as.character(periods),
+                                             "\\(([0-9\\.]+),")[, 2]),
+         end_period   = as.numeric(str_match(as.character(periods),
+                                             ",([0-9\\.]+)\\]")[, 2]))
+
+# Kar et al. (2013) acceleration filter on average growth-rate jumps
+kar_filter <- period_growthrates %>%
+  mutate(diff = avg_growth_rate - lag(avg_growth_rate),
+         prev_dir = case_when(is.na(lag(diff)) ~ NA_character_,
+                              lag(diff) > 0 ~ "acceleration",
+                              lag(diff) < 0 ~ "deceleration",
+                              TRUE ~ "no_change"),
+         curr_dir = case_when(diff > 0 ~ "acceleration",
+                              diff < 0 ~ "deceleration",
+                              TRUE ~ "no_change"),
+         threshold = case_when(is.na(prev_dir) ~ 0.02,
+                               prev_dir != curr_dir ~ 0.03,
+                               prev_dir == curr_dir ~ 0.01,
+                               TRUE ~ NA_real_),
+         passes_kar = case_when(is.na(diff) ~ NA,
+                                abs(diff) >= threshold ~ TRUE,
+                                TRUE ~ FALSE))
+
+# Helper for breakpoint vector used downstream
+all_break_years <- c(start_year, break_years, end_year)
+```
+
+```{r growth-breaks-plot, fig.height=4.5}
+ggplot(penn_growth %>% filter(!is.na(growth_rate)),
+       aes(year, growth_rate)) +
+  geom_rect(data = kar_filter, inherit.aes = FALSE,
+            aes(xmin = start_period, xmax = end_period,
+                ymin = -Inf, ymax = Inf, fill = passes_kar),
+            alpha = 0.18) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.4) +
+  geom_line(linewidth = 0.6) +
+  geom_point(size = 1.2) +
+  geom_segment(data = period_growthrates,
+               aes(x = start_period, xend = end_period,
+                   y = avg_growth_rate, yend = avg_growth_rate),
+               linewidth = 0.7, color = gl$brand_blue) +
+  geom_label(data = period_growthrates,
+             aes(x = (start_period + end_period) / 2,
+                 y = avg_growth_rate,
+                 label = scales::percent(avg_growth_rate, accuracy = 0.1)),
+             size = 3, label.size = 0.2) +
+  scale_y_continuous(labels = scales::percent, n.breaks = 8) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  scale_fill_manual(values = c("TRUE" = "#36B250", "FALSE" = "#C64646"),
+                    na.value = "grey80") +
+  labs(x = NULL, y = "Real GDP per capita growth rate",
+       fill = "Passes Kar filter",
+       title = paste(cname, "growth breaks"),
+       subtitle = sprintf("Bai-Perron breaks at %s. Source: Penn World Tables 11.0.",
+                          paste(break_years, collapse = ", "))) +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/cambodia/growth_breaks.png", width = 9, height = 5, dpi = 300)
+```
+
+```{r growth-breaks-table}
+period_growthrates %>%
+  transmute(Period = as.character(periods),
+            Years = length,
+            `Avg. growth`    = scales::percent(avg_growth_rate, accuracy = 0.1),
+            `Median growth`  = scales::percent(mdn_growth_rate, accuracy = 0.1)) %>%
+  filter(!is.na(Years)) %>%
+  kable(caption = sprintf("%s GDP-per-capita growth periods (PWT 11.0).", cname))
+```
+
+The Bai-Perron procedure gives break years **`r paste(break_years, collapse = ", ")`**.
+We carry these forward as the periodisation for every chart below.
+
+# Sectoral value-added across the growth breaks
+
+Using WDI value-added series (constant 2015 USD), we plot each sector's
+trajectory on a log scale, with vertical dashes at the growth-break years and
+per-period CAGR labels.
+
+```{r sectoral-load, cache=TRUE}
+macro <- read_parquet(
+  "data/shared-data/growth-lab/glmacro_master_alldata.parquet",
+  col_select = c("countrycodeiso", "year",
+                 "wdi_nv_agr_totl_kd", "wdi_nv_ind_totl_kd",
+                 "wdi_nv_srv_totl_kd", "wdi_nv_ind_manf_kd",
+                 "wdi_ne_exp_gnfs_zs",
+                 "wdi_sl_agr_empl_zs", "wdi_sl_ind_empl_zs",
+                 "wdi_sl_srv_empl_zs", "wdi_sl_tlf_totl_in")
+) %>%
+  rename(iso3 = countrycodeiso) %>%
+  filter(iso3 == ccode)
+```
+
+```{r sectoral-va-plot, fig.height=4.7}
+sector_levels <- c("agr" = "Agriculture",
+                   "ind" = "Industry",
+                   "srv" = "Services")
+
+khm_sectoral <- macro %>%
+  select(year, wdi_nv_agr_totl_kd, wdi_nv_ind_totl_kd, wdi_nv_srv_totl_kd) %>%
+  pivot_longer(-year, names_to = "code", values_to = "value") %>%
+  mutate(sector_short = str_remove(code, "wdi_nv_") %>% str_remove("_totl_kd"),
+         Sector = sector_levels[sector_short]) %>%
+  filter(!is.na(value), !is.na(Sector))
+
+# Period CAGRs from observed values within each period
+sector_period_cagrs <- function(df, value_col = "value") {
+  df %>%
+    mutate(period = cut(year,
+                        breaks = all_break_years,
+                        dig.lab = 4)) %>%
+    filter(!is.na(period)) %>%
+    group_by(Sector, period) %>%
+    arrange(year) %>%
+    summarise(start_year_p = first(year),
+              end_year_p   = last(year),
+              start_val    = first(.data[[value_col]]),
+              end_val      = last(.data[[value_col]]),
+              n            = end_year_p - start_year_p,
+              cagr = if_else(n > 0 & start_val > 0,
+                             (end_val / start_val)^(1 / n) - 1, NA_real_),
+              avg_value = exp(mean(log(.data[[value_col]]), na.rm = TRUE)),
+              .groups = "drop") %>%
+    mutate(mid_year = (start_year_p + end_year_p) / 2)
+}
+
+va_period_cagrs <- sector_period_cagrs(khm_sectoral, "value")
+
+sector_palette <- c("Agriculture" = "#EAC218",
+                    "Industry"    = "#36B250",
+                    "Services"    = "#266798")
+
+ggplot(khm_sectoral, aes(year, value, color = Sector)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 0.9) +
+  geom_label_repel(data = va_period_cagrs %>% filter(!is.na(cagr)),
+                   aes(x = mid_year, y = avg_value,
+                       label = scales::percent(cagr, accuracy = 0.1)),
+                   size = 2.8, label.size = 0.15,
+                   min.segment.length = 0.2,
+                   show.legend = FALSE) +
+  scale_y_log10(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_x_continuous(breaks = seq(1970, 2025, 10)) +
+  scale_color_manual(values = sector_palette) +
+  labs(x = NULL, y = "Sectoral value added (constant 2015 USD, log)",
+       title = sprintf("%s sectoral value added", cname),
+       subtitle = sprintf("Vertical dashes mark growth breaks (%s). Labels are period CAGRs.",
+                          paste(break_years, collapse = ", ")),
+       color = NULL) +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/cambodia/sectoral_value_added.png", width = 9, height = 5, dpi = 300)
+```
+
+# Exports as % of GDP across the growth breaks
+
+WDI's exports-of-goods-and-services share starts in 1993 for Cambodia, so the
+1979 and 1987 break lines fall left of the data. Period growth rates label the
+average annual change in the export share within each visible period.
+
+```{r exports-plot, fig.height=4.0}
+khm_exports <- macro %>%
+  select(year, share = wdi_ne_exp_gnfs_zs) %>%
+  filter(!is.na(share))
+
+# Use simple period-mean and period CAGR of the share itself
+exports_cagrs <- khm_exports %>%
+  mutate(period = cut(year,
+                      breaks = all_break_years,
+                      dig.lab = 4)) %>%
+  filter(!is.na(period)) %>%
+  group_by(period) %>%
+  arrange(year) %>%
+  summarise(start_year_p = first(year),
+            end_year_p   = last(year),
+            start_val    = first(share),
+            end_val      = last(share),
+            n            = end_year_p - start_year_p,
+            cagr = if_else(n > 0 & start_val > 0,
+                           (end_val / start_val)^(1 / n) - 1, NA_real_),
+            mid_share = mean(share, na.rm = TRUE),
+            .groups = "drop") %>%
+  mutate(mid_year = (start_year_p + end_year_p) / 2)
+
+ggplot(khm_exports, aes(year, share)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.7, color = gl$brand_blue) +
+  geom_point(size = 1.0, color = gl$brand_blue) +
+  geom_label_repel(data = exports_cagrs %>% filter(!is.na(cagr)),
+                   aes(x = mid_year, y = mid_share,
+                       label = scales::percent(cagr, accuracy = 0.1)),
+                   size = 3, label.size = 0.15,
+                   min.segment.length = 0.2) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5),
+                     limits = c(start_year, end_year)) +
+  scale_y_continuous(labels = function(x) paste0(x, "%")) +
+  labs(x = NULL, y = "Exports of goods & services (% of GDP)",
+       title = sprintf("%s: export orientation, 1993-present", cname),
+       subtitle = "Vertical dashes mark growth breaks. Labels: period CAGR of the share.") +
+  theme(legend.position = "none")
+
+ggsave("imgs/cambodia/exports_share.png", width = 9, height = 5, dpi = 300)
+```
+
+# Sectoral labour productivity across the growth breaks
+
+Value added per worker by sector. Sectoral employment shares
+(`wdi_sl_*_empl_zs`) and total labour force (`wdi_sl_tlf_totl_in`) are available
+from 1991 for Cambodia, so the 1979 and 1987 break lines fall left of the data.
+
+```{r productivity-plot, fig.height=4.7}
+khm_prod <- macro %>%
+  filter(!is.na(wdi_sl_tlf_totl_in)) %>%
+  transmute(year,
+            agr_workers = wdi_sl_agr_empl_zs / 100 * wdi_sl_tlf_totl_in,
+            ind_workers = wdi_sl_ind_empl_zs / 100 * wdi_sl_tlf_totl_in,
+            srv_workers = wdi_sl_srv_empl_zs / 100 * wdi_sl_tlf_totl_in,
+            agr_va = wdi_nv_agr_totl_kd,
+            ind_va = wdi_nv_ind_totl_kd,
+            srv_va = wdi_nv_srv_totl_kd) %>%
+  mutate(Agriculture = agr_va / agr_workers,
+         Industry    = ind_va / ind_workers,
+         Services    = srv_va / srv_workers) %>%
+  select(year, Agriculture, Industry, Services) %>%
+  pivot_longer(-year, names_to = "Sector", values_to = "value") %>%
+  filter(!is.na(value), is.finite(value))
+
+prod_period_cagrs <- sector_period_cagrs(khm_prod, "value")
+
+ggplot(khm_prod, aes(year, value, color = Sector)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.7) +
+  geom_point(size = 0.9) +
+  geom_label_repel(data = prod_period_cagrs %>% filter(!is.na(cagr)),
+                   aes(x = mid_year, y = avg_value,
+                       label = scales::percent(cagr, accuracy = 0.1)),
+                   size = 2.8, label.size = 0.15,
+                   min.segment.length = 0.2,
+                   show.legend = FALSE) +
+  scale_y_log10(labels = scales::label_number(scale_cut = scales::cut_short_scale())) +
+  scale_x_continuous(breaks = seq(1990, 2025, 5)) +
+  scale_color_manual(values = sector_palette) +
+  labs(x = NULL, y = "Value added per worker (constant 2015 USD, log)",
+       title = sprintf("%s: sectoral labour productivity", cname),
+       subtitle = "Sectoral VA divided by sector employment. Vertical dashes: growth breaks. Labels: period CAGR.",
+       color = NULL) +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/cambodia/sectoral_productivity.png", width = 9, height = 5, dpi = 300)
+```
+
+# Country space at each break year
+
+Using the V-Dem-based country-space pipeline from
+`analyses/country-space-writeup.Rmd`, we re-build the space at the original
+year (1970), at each Cambodia growth-break year (1979, 1987, 1997, 2006), and
+at the present (2025). Cambodia is highlighted in each panel.
+
+```{r vdem-load, cache=TRUE}
+vdem_raw      <- read_parquet("data/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("data/shared-data/vdem/vdem_codebook.parquet")
+```
+
+```{r country-space-pipeline, cache=TRUE}
+# Re-implementation of the country-space pipeline. Kept self-contained here
+# rather than sourced from the writeup Rmd; if a third caller appears, lift
+# this to an R/ helper.
+
+discrete_vars <- c("v2regopploc", "v2regsuploc")
+
+redundant_drops <- c(
+  "v2cldmovew", "v2cldiscw", "v2clslavef", "v2clprptyw", "v2clacjstw",
+  "v2juncind", "v2juhccomp", "v2csrlgrep", "v2csrlgcon", "v2exdfdmhs",
+  "v2smgovsm", "v2lgqstexp", "v2lglegplo", "v2merange", "v2dlreason",
+  "v2psoppaut", "v2cafexch", "v2caconmob"
+)
+
+region_labels <- c(
+  "1" = "E. Europe & Central Asia",  "2" = "Latin America & Caribbean",
+  "3" = "Middle East & N. Africa",   "4" = "Sub-Saharan Africa",
+  "5" = "W. Europe & N. America",    "6" = "East Asia & Pacific"
+)
+
+region_lookup <- vdem_raw %>%
+  group_by(country_name) %>%
+  slice_max(year, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  select(country_name, e_regionpol_6C) %>%
+  mutate(region = region_labels[as.character(e_regionpol_6C)]) %>%
+  select(country_name, region) %>%
+  deframe()
+
+suffixes        <- c("_codelow", "_codehigh", "_sd", "_osp",
+                     "_ord", "_mean", "_nr", "_rec")
+all_cols        <- names(vdem_raw)
+is_suffix       <- vapply(all_cols, function(x)
+                          any(vapply(suffixes, endsWith, logical(1), x = x)),
+                          logical(1))
+is_numbered     <- grepl("_\\d+$", all_cols)
+base_cols       <- all_cols[!is_suffix & !is_numbered]
+component_codes <- vdem_codebook %>%
+                     filter(vartype == "C") %>% pull(tag) %>% unique()
+candidate_codes <- intersect(component_codes, base_cols) %>%
+                     setdiff(discrete_vars) %>%
+                     setdiff(redundant_drops)
+candidate_codes <- candidate_codes[
+  vapply(candidate_codes, function(x) is.numeric(vdem_raw[[x]]), logical(1))
+]
+
+build_country_space <- function(target_year,
+                                min_indicator_coverage = 0.5,
+                                max_country_missing    = 0.5,
+                                seed = 42,
+                                n_neighbors = 15,
+                                min_dist = 0.2,
+                                n_epochs = 500) {
+  year_data <- vdem_raw %>% filter(year == target_year)
+  n_total   <- nrow(year_data)
+
+  coverage  <- vapply(candidate_codes,
+                      function(x) sum(!is.na(year_data[[x]])),
+                      integer(1))
+  threshold <- min_indicator_coverage * n_total
+  indicators <- candidate_codes[coverage >= threshold]
+
+  raw <- year_data %>%
+    select(country_name, all_of(indicators)) %>%
+    mutate(p_missing = rowSums(is.na(across(all_of(indicators)))) /
+                       length(indicators)) %>%
+    filter(p_missing < max_country_missing) %>%
+    select(-p_missing) %>%
+    column_to_rownames("country_name") %>%
+    as.matrix()
+
+  for (j in seq_len(ncol(raw))) {
+    na_idx <- is.na(raw[, j])
+    if (any(na_idx)) raw[na_idx, j] <- mean(raw[, j], na.rm = TRUE)
+  }
+
+  Mz <- scale(raw, center = TRUE, scale = TRUE)
+  Mz <- Mz[, !is.nan(colSums(Mz)), drop = FALSE]
+
+  set.seed(seed)
+  emb <- umap(Mz, n_neighbors = n_neighbors,
+              min_dist = min_dist, n_epochs = n_epochs)
+
+  coords <- tibble(
+    country = rownames(Mz),
+    UMAP1   = emb[, 1],
+    UMAP2   = emb[, 2],
+    region  = unname(region_lookup[country])
+  ) %>%
+    mutate(region = replace_na(region, "Other"))
+
+  list(year = target_year,
+       n_countries = nrow(Mz),
+       n_indicators = ncol(Mz),
+       indicators = colnames(Mz),
+       Mz = Mz,
+       coords = coords)
+}
+```
+
+```{r build-snapshots, cache=TRUE}
+snapshot_years <- c(1970, break_years, 2025)
+spaces <- map(snapshot_years, build_country_space)
+names(spaces) <- as.character(snapshot_years)
+
+space_summary <- map_dfr(spaces, function(s)
+  tibble(year = s$year,
+         n_countries  = s$n_countries,
+         n_indicators = s$n_indicators))
+kable(space_summary,
+      caption = "Country-space pipeline output by snapshot year.")
+```
+
+```{r country-space-plot-fn}
+plot_country_space_khm <- function(sp,
+                                   target = "Cambodia",
+                                   label_size = 2.4,
+                                   point_size = 2.0) {
+  d <- sp$coords %>%
+    mutate(is_target = country == target)
+
+  ggplot(d, aes(UMAP1, UMAP2)) +
+    geom_point(aes(color = region), size = point_size, alpha = 0.65) +
+    geom_point(data = ~ filter(.x, is_target),
+               color = highlight, size = 4.2) +
+    geom_text_repel(
+      data = ~ filter(.x, !is_target),
+      aes(label = country),
+      size = label_size, max.overlaps = 30,
+      segment.alpha = 0.25, color = "grey25",
+      show.legend = FALSE
+    ) +
+    geom_label_repel(
+      data = ~ filter(.x, is_target),
+      aes(label = country),
+      size = 3.6, color = highlight, fontface = "bold",
+      box.padding = 0.6, point.padding = 0.4,
+      label.size = 0.4, label.padding = unit(0.25, "lines"),
+      segment.color = highlight, segment.alpha = 0.7,
+      show.legend = FALSE
+    ) +
+    labs(x = "UMAP 1", y = "UMAP 2", color = NULL,
+         title = sprintf("Country space, %d", sp$year),
+         subtitle = sprintf("%d countries x %d V-Dem indicators",
+                            sp$n_countries, sp$n_indicators)) +
+    theme(legend.position = "bottom")
+}
+```
+
+```{r save-individual-spaces, fig.show='hide', cache=FALSE}
+for (yr in snapshot_years) {
+  p <- plot_country_space_khm(spaces[[as.character(yr)]])
+  ggsave(sprintf("imgs/cambodia/country_space_%d.png", yr),
+         p, width = 9, height = 9, dpi = 300)
+}
+```
+
+\newpage
+
+## 1970
+
+```{r plot-1970, fig.width=7, fig.height=8.0, out.width="100%"}
+plot_country_space_khm(spaces[["1970"]])
+```
+
+\newpage
+
+## 1979
+
+```{r plot-1979, fig.width=7, fig.height=8.0, out.width="100%"}
+plot_country_space_khm(spaces[["1979"]])
+```
+
+\newpage
+
+## 1987
+
+```{r plot-1987, fig.width=7, fig.height=8.0, out.width="100%"}
+plot_country_space_khm(spaces[["1987"]])
+```
+
+\newpage
+
+## 1997
+
+```{r plot-1997, fig.width=7, fig.height=8.0, out.width="100%"}
+plot_country_space_khm(spaces[["1997"]])
+```
+
+\newpage
+
+## 2006
+
+```{r plot-2006, fig.width=7, fig.height=8.0, out.width="100%"}
+plot_country_space_khm(spaces[["2006"]])
+```
+
+\newpage
+
+## 2025
+
+```{r plot-2025, fig.width=7, fig.height=8.0, out.width="100%"}
+plot_country_space_khm(spaces[["2025"]])
+```
+
+\newpage
+
+# Cambodia's k nearest peers at each break year
+
+For each snapshot we compute Euclidean distance in the **z-scored V-Dem feature
+space** (`Mz`, not the UMAP coordinates) between Cambodia and every other country
+present in that year. The UMAP layout is for visualisation; the high-dimensional
+space is what defines "institutional similarity."
+
+```{r nearest-peers, cache=TRUE, dependson="build-snapshots"}
+k_peers <- 10
+
+khm_neighbors <- function(sp, target = "Cambodia", k = k_peers) {
+  if (!target %in% rownames(sp$Mz)) {
+    return(tibble(rank = integer(), country = character(),
+                  distance = double(), region = character()))
+  }
+  v   <- sp$Mz[target, , drop = TRUE]
+  d   <- sqrt(rowSums((sp$Mz - matrix(v, nrow = nrow(sp$Mz),
+                                      ncol = ncol(sp$Mz),
+                                      byrow = TRUE))^2))
+  d   <- d[names(d) != target]
+  ord <- order(d)[seq_len(min(k, length(d)))]
+  tibble(rank = seq_along(ord),
+         country = names(d)[ord],
+         distance = unname(d[ord]),
+         region = unname(region_lookup[names(d)[ord]]))
+}
+
+peers_long <- map_dfr(snapshot_years, function(yr) {
+  khm_neighbors(spaces[[as.character(yr)]]) %>%
+    mutate(year = yr) %>%
+    relocate(year)
+})
+
+# Wide table: one column per snapshot year, k_peers rows.
+peers_wide <- peers_long %>%
+  mutate(label = sprintf("%s (%.2f)", country, distance)) %>%
+  select(year, rank, label) %>%
+  pivot_wider(names_from = year, values_from = label,
+              names_prefix = "y_") %>%
+  arrange(rank)
+
+names(peers_wide) <- str_replace(names(peers_wide), "^y_", "")
+
+kable(peers_wide,
+      caption = sprintf("%s's %d nearest peers in V-Dem feature space at each snapshot year. Number in parentheses is Euclidean distance on z-scored features.",
+                        cname, k_peers))
+```
+
+```{r nearest-peers-2025}
+peers_long %>%
+  filter(year == 2025) %>%
+  transmute(Rank     = rank,
+            Country  = country,
+            Region   = region,
+            Distance = round(distance, 2)) %>%
+  kable(caption = sprintf("%s's %d nearest peers today (2025 V-Dem cross-section). Same Euclidean distance on z-scored features as the multi-year table above; the wide table is too narrow to fit the 2025 column on the page so we list it separately here.",
+                          cname, k_peers))
+```
+
+```{r persist-peers}
+write_csv(peers_long, "outputs/cambodia_peers_by_break_year.csv")
+```
+
+\newpage
+
+# Institutional position over time (pooled PCA)
+
+The lens here is the pooled-panel PCA fit in
+`analyses/pooled-panel-pca.Rmd`. Fitting on every (country, year) cell from
+1970-2025 (rather than on 2025 alone) gives axes whose loadings reflect
+variance over the full window we care about, which is the right choice for
+trajectory analysis. Two axes survive the pool with clear interpretation:
+
+- **PC1 — openness of the regime.** Positive = liberal democracy
+  (free expression, free press, autonomous electoral management,
+  independent judiciary, peaceful assembly). Negative = personalist /
+  ideological autocracy with a state-controlled information environment.
+- **PC2 — stateness / encompassment.** Positive = the state encompasses
+  society (broad public-goods delivery, uniform subnational
+  administration, clean everyday administration; *and* state ownership of
+  economy, state-owned media, controlled CSO and party space). Negative =
+  society encompasses the state (private economy and media, autonomous
+  CSOs and universities, judicial review *or* political violence,
+  insurgent movements, weak central authority).
+
+The two axes are orthogonal by construction. Welfare democracies and
+developmental autocracies share encompassment (high PC2) despite opposing
+each other on PC1; liberal-market democracies and weak / contested
+polities share non-state weight (low PC2) despite opposing each other on
+PC1. See `pooled-panel-pca.Rmd` for the full loading detail and sign
+verification.
+
+```{r load-pooled-pca, cache=TRUE}
+pooled_scores <- read_csv("outputs/pooled_pca/country_year_pc_scores.csv",
+                          show_col_types = FALSE)
+
+# Sign convention (verified against pooled-panel-pca.Rmd top-loadings table):
+# - PC1 positive pole loads on freedom of discussion, peaceful assembly,
+#   freedom from torture, EMB autonomy → high PC1 = liberal democracy.
+# - PC2 positive pole loads on educational/health equality, state-owned
+#   broadcast media, state ownership of economy (after V-Dem reverse
+#   coding) → high PC2 = state encompasses society.
+# No flips needed.
+
+pooled_scores <- pooled_scores %>%
+  mutate(region = unname(region_lookup[country_name]),
+         region = replace_na(region, "Other"))
+```
+
+```{r pooled-quadrants-plot, fig.width=7.2, fig.height=9.5, out.width="100%"}
+pooled_snapshots <- pooled_scores %>%
+  filter(year %in% snapshot_years) %>%
+  mutate(is_target = country_name == "Cambodia")
+
+axis_lim <- max(abs(c(pooled_snapshots$PC1, pooled_snapshots$PC2)),
+                na.rm = TRUE) * 1.05
+
+quadrant_labels_pool <- tibble(
+  label = c("State-encompassing\ndemocracy",
+            "State-encompassing\nautocracy",
+            "Liberal-market\ndemocracy",
+            "Weak / contested\nautocracy"),
+  x     = c( 1, -1,  1, -1) * axis_lim * 0.95,
+  y     = c( 1,  1, -1, -1) * axis_lim * 0.95,
+  hjust = c( 1,  0,  1,  0),
+  vjust = c( 1,  1,  0,  0)
+)
+
+ggplot(pooled_snapshots, aes(PC1, PC2)) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             color = "grey50", alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed",
+             color = "grey50", alpha = 0.6) +
+  geom_text(data = quadrant_labels_pool,
+            aes(x = x, y = y, label = label,
+                hjust = hjust, vjust = vjust),
+            color = "grey45", size = 2.2, lineheight = 0.9,
+            inherit.aes = FALSE) +
+  geom_point(aes(color = is_target, size = is_target, alpha = is_target)) +
+  geom_label_repel(data = ~ filter(.x, is_target),
+                   aes(label = country_name),
+                   color = highlight, fontface = "bold",
+                   size = 3, label.size = 0.3,
+                   label.padding = unit(0.2, "lines"),
+                   box.padding = 0.5, point.padding = 0.3,
+                   segment.color = highlight,
+                   show.legend = FALSE) +
+  facet_wrap(~ year, ncol = 2) +
+  scale_color_manual(values = c("FALSE" = "grey55", "TRUE" = highlight)) +
+  scale_size_manual(values = c("FALSE" = 0.9, "TRUE" = 2.6)) +
+  scale_alpha_manual(values = c("FALSE" = 0.45, "TRUE" = 1)) +
+  scale_x_continuous(limits = c(-axis_lim, axis_lim)) +
+  scale_y_continuous(limits = c(-axis_lim, axis_lim)) +
+  labs(x = "PC1 — openness of regime (high = liberal democracy)",
+       y = "PC2 — stateness (high = state encompasses society)",
+       title = sprintf("%s in pooled (PC1, PC2) space, by snapshot year", cname),
+       subtitle = "Each panel: every country-year that survived the pooled-PCA filter at that year.") +
+  theme(legend.position = "none",
+        strip.text = element_text(face = "bold", size = 10),
+        panel.spacing = unit(0.8, "lines"))
+
+ggsave("imgs/cambodia/pooled_quadrants_by_year.png",
+       width = 9, height = 12, dpi = 300)
+```
+
+\newpage
+
+## Cambodia's PC1 and PC2 over time
+
+Pooled-PCA scores carry the full 1970-`r max(pooled_scores$year)` trajectory
+for every country in the panel. We plot Cambodia's two co-ordinates
+separately so each axis can be read on its own scale.
+
+```{r khm-pooled-pc1, fig.height=3.5}
+khm_pcs <- pooled_scores %>%
+  filter(country_name == "Cambodia",
+         year >= 1970) %>%
+  arrange(year)
+
+ggplot(khm_pcs, aes(year, PC1)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.3) +
+  geom_line(linewidth = 0.8, color = highlight) +
+  geom_point(size = 1.0, color = highlight) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  labs(x = NULL, y = "PC1 (high = liberal democracy)",
+       title = sprintf("%s PC1 over time (pooled PCA)", cname),
+       subtitle = "Vertical dashes mark growth breaks (1979, 1987, 1997, 2006).")
+
+ggsave("imgs/cambodia/khm_pooled_pc1.png", width = 9, height = 4.5, dpi = 300)
+```
+
+```{r khm-pooled-pc2, fig.height=3.5}
+ggplot(khm_pcs, aes(year, PC2)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.3) +
+  geom_line(linewidth = 0.8, color = highlight) +
+  geom_point(size = 1.0, color = highlight) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  labs(x = NULL, y = "PC2 (high = state encompasses society)",
+       title = sprintf("%s PC2 over time (pooled PCA)", cname),
+       subtitle = "Vertical dashes mark growth breaks (1979, 1987, 1997, 2006).")
+
+ggsave("imgs/cambodia/khm_pooled_pc2.png", width = 9, height = 4.5, dpi = 300)
+```
+
+PC1 sits deep in the personalist-autocracy region across the entire window:
+the post-Khmer-Rouge PRK years and the 1990s UNTAC interlude move PC1
+modestly up, but from 2000 onward Hun Sen's consolidation reverses that.
+PC2 traces the substantive state-building story more cleanly: negative
+through the post-conflict 1990s and 2000s (society encompasses state — weak
+central authority, autonomous donors and NGOs, civil-war hangover), then
+trending steadily upward from 2010 as the regime extends administrative
+reach, party-system control, and media-environment control. By the end of
+the window Cambodia has crossed into PC2-positive territory — a
+state-encompassing autocracy.
+
+\newpage
+
+## 2025 cross-section, original single-year PCA
+
+For comparison, we keep the original single-year PCA built on the 2025
+V-Dem cross-section. PC1 there reads as openness in the same direction as
+the pooled fit; PC2 carries the *managed-vs-contested* reading used in the
+deals-development writeup (high = contested politics — Pakistan, Lebanon —
+low = managed). Because the loadings are pulled toward post-2000 modules
+that don't exist before 2000, this PCA is the right lens for *where
+Cambodia sits today* relative to its contemporaries, but a poor lens for
+trajectories. The 2025-only fit is also what feeds the PC2 driver
+decomposition in the next section.
+
+```{r settlement-pca-2025, cache=TRUE}
+# Mirror the institutional-complexity / deals-development pipeline:
+# vartype C indicators with >=150-country coverage in 2025, drop the two
+# discrete vars, min-max normalize across the 2025 cross-section, NA -> 0.
+latest_year_settle <- vdem_raw %>%
+  filter(year >= 2020) %>%
+  group_by(year) %>%
+  summarise(n_countries = n_distinct(country_name), .groups = "drop") %>%
+  filter(n_countries >= 150) %>%
+  pull(year) %>% max()
+
+settle_candidates <- vdem_codebook %>%
+  filter(vartype == "C") %>% pull(tag) %>% unique() %>%
+  intersect(base_cols) %>%
+  setdiff(discrete_vars)
+
+vdem_2025 <- vdem_raw %>% filter(year == latest_year_settle)
+settle_coverage <- vapply(settle_candidates,
+                          function(x) sum(!is.na(vdem_2025[[x]])),
+                          integer(1))
+settle_numeric  <- vapply(settle_candidates,
+                          function(x) is.numeric(vdem_raw[[x]]),
+                          logical(1))
+settle_indicators <- settle_candidates[settle_coverage >= 150 & settle_numeric]
+
+mcp_df_2025 <- vdem_2025 %>%
+  select(country_name, all_of(settle_indicators)) %>%
+  mutate(p_missing = rowSums(is.na(across(all_of(settle_indicators)))) /
+                     length(settle_indicators)) %>%
+  filter(p_missing < 0.5) %>%
+  select(-p_missing)
+
+# Cache 2025 min/max bounds for projecting history.
+feat_bounds <- tibble(
+  code = settle_indicators,
+  min  = vapply(settle_indicators,
+                function(x) min(mcp_df_2025[[x]], na.rm = TRUE),
+                double(1)),
+  max  = vapply(settle_indicators,
+                function(x) max(mcp_df_2025[[x]], na.rm = TRUE),
+                double(1))
+)
+
+apply_2025_bounds <- function(df) {
+  cols_present <- intersect(feat_bounds$code, names(df))
+  for (ind in cols_present) {
+    rng <- c(feat_bounds$min[feat_bounds$code == ind],
+             feat_bounds$max[feat_bounds$code == ind])
+    df[[ind]] <- if (rng[2] > rng[1])
+      (df[[ind]] - rng[1]) / (rng[2] - rng[1]) else 0
+  }
+  df %>% mutate(across(all_of(cols_present), ~replace_na(.x, 0)))
+}
+
+mcp_2025_norm <- apply_2025_bounds(mcp_df_2025)
+Mcp_2025 <- mcp_2025_norm %>%
+  column_to_rownames("country_name") %>%
+  as.matrix()
+
+pca_2025 <- prcomp(Mcp_2025, center = TRUE, scale. = TRUE)
+
+# Sign conventions for the 2025 PCA:
+# - PC1 positive = liberal democracy (anchor on Sweden / Germany).
+# - PC2 positive = contested (anchor on Pakistan / Lebanon).
+pc1_2025_scores <- pca_2025$x[, "PC1"]
+anchor_pc1 <- intersect(c("Sweden", "Germany"), names(pc1_2025_scores))
+pc1_sign_2025 <- if (length(anchor_pc1) > 0 &&
+                     mean(pc1_2025_scores[anchor_pc1]) < 0) -1 else 1
+
+pc2_2025_scores <- pca_2025$x[, "PC2"]
+anchor_countries <- intersect(c("Pakistan", "Lebanon"), names(pc2_2025_scores))
+pc2_sign <- if (length(anchor_countries) > 0 &&
+                mean(pc2_2025_scores[anchor_countries]) < 0) -1 else 1
+```
+
+```{r settlement-2025-quadrant-plot, fig.width=7.2, fig.height=8.0, out.width="100%"}
+scores_2025 <- tibble(
+  country_name = rownames(pca_2025$x),
+  PC1 = pc1_sign_2025 * pca_2025$x[, "PC1"],
+  PC2 = pc2_sign      * pca_2025$x[, "PC2"]
+) %>%
+  mutate(is_target = country_name == "Cambodia",
+         region = unname(region_lookup[country_name]),
+         region = replace_na(region, "Other"))
+
+axis_lim_2025 <- max(abs(c(scores_2025$PC1, scores_2025$PC2)),
+                     na.rm = TRUE) * 1.05
+
+quadrant_labels_2025 <- tibble(
+  label = c("Competitive\nclientelist",
+            "Vulnerable\nauthoritarian\ncoalition",
+            "Consolidated\ndemocracy",
+            "Dominant\nparty"),
+  x     = c( 1, -1,  1, -1) * axis_lim_2025 * 0.95,
+  y     = c( 1,  1, -1, -1) * axis_lim_2025 * 0.95,
+  hjust = c( 1,  0,  1,  0),
+  vjust = c( 1,  1,  0,  0)
+)
+
+ggplot(scores_2025, aes(PC1, PC2)) +
+  geom_vline(xintercept = 0, linetype = "dashed",
+             color = "grey50", alpha = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed",
+             color = "grey50", alpha = 0.6) +
+  geom_text(data = quadrant_labels_2025,
+            aes(x = x, y = y, label = label,
+                hjust = hjust, vjust = vjust),
+            color = "grey45", size = 2.4, lineheight = 0.9,
+            inherit.aes = FALSE) +
+  geom_point(aes(color = is_target, size = is_target, alpha = is_target)) +
+  geom_text_repel(data = ~ filter(.x, !is_target),
+                  aes(label = country_name),
+                  size = 2.2, max.overlaps = 30,
+                  segment.alpha = 0.25, color = "grey25",
+                  show.legend = FALSE) +
+  geom_label_repel(data = ~ filter(.x, is_target),
+                   aes(label = country_name),
+                   color = highlight, fontface = "bold",
+                   size = 3.2, label.size = 0.3,
+                   label.padding = unit(0.2, "lines"),
+                   box.padding = 0.6, point.padding = 0.4,
+                   segment.color = highlight,
+                   show.legend = FALSE) +
+  scale_color_manual(values = c("FALSE" = "grey55", "TRUE" = highlight)) +
+  scale_size_manual(values = c("FALSE" = 0.9, "TRUE" = 2.6)) +
+  scale_alpha_manual(values = c("FALSE" = 0.45, "TRUE" = 1)) +
+  scale_x_continuous(limits = c(-axis_lim_2025, axis_lim_2025)) +
+  scale_y_continuous(limits = c(-axis_lim_2025, axis_lim_2025)) +
+  labs(x = "PC1 — openness (high = liberal democracy)",
+       y = "PC2 — contested vs managed (high = contested)",
+       title = sprintf("%s in 2025 cross-sectional PCA space", cname),
+       subtitle = "Original single-year PCA on the 2025 V-Dem cross-section.") +
+  theme(legend.position = "none")
+
+ggsave("imgs/cambodia/khm_2025_pc1_pc2_quadrant.png",
+       width = 9, height = 9.5, dpi = 300)
+```
+
+\newpage
+
+# Drivers of Cambodia's PC2 climb, 2006-2025
+
+Cambodia's pooled PC2 climbs from clearly negative in 2006 (society
+encompasses state — autonomous donors and NGOs, civil-war hangover, weak
+central authority) to positive in 2025 (state encompasses society —
+administrative reach, party-system control, and media-environment control
+all extending under Hun Sen). We decompose that move indicator by indicator
+using the pooled PCA loadings, to see which V-Dem features did the work.
+
+The change in Cambodia's PC2 from year A to year B is additive across
+indicators:
+
+$$\Delta \text{PC2} = \sum_j \text{loading}_j \cdot (z_{B,j} - z_{A,j})$$
+
+where $z_{Y,j} = (x_{Y,j} - \mu_j) / \sigma_j$ is the pool-z-scored value of
+indicator $j$ in year $Y$, $(\mu_j, \sigma_j)$ are the pool mean and
+standard deviation cached by the pooled PCA fit, and $\text{loading}_j$ is
+the indicator's coefficient in the PC2 rotation. NAs are imputed to the
+pool mean and so contribute zero to that year's z-score by construction.
+We sort by absolute contribution and keep the top.
+
+```{r pc2-drivers-compute, cache=TRUE}
+n_top_drivers <- 12
+
+pca_pool_obj      <- readRDS("outputs/pooled_pca/pca_pool.rds")
+pool_features     <- pca_pool_obj$indicators
+pool_means        <- pca_pool_obj$feature_means[pool_features]
+pool_sds          <- pca_pool_obj$feature_sds[pool_features]
+loadings_pc2_pool <- pca_pool_obj$rotation[pool_features, "PC2"]
+# Pooled PC2 sign convention: positive pole = state encompasses society
+# (verified in load-pooled-pca chunk; no sign flip needed).
+
+khm_endpoints_raw <- vdem_raw %>%
+  filter(country_name == "Cambodia",
+         year %in% c(2006, 2025)) %>%
+  select(year, any_of(pool_features))
+
+get_raw <- function(yr) {
+  row <- khm_endpoints_raw %>% filter(year == yr)
+  vals <- setNames(rep(NA_real_, length(pool_features)), pool_features)
+  cols_present <- intersect(names(row), pool_features)
+  if (nrow(row) == 1)
+    vals[cols_present] <- as.numeric(row[1, cols_present, drop = TRUE])
+  vals
+}
+raw_2006 <- get_raw(2006)
+raw_2025 <- get_raw(2025)
+
+impute_pool <- function(v) ifelse(is.na(v), pool_means, v)
+z_2006 <- (impute_pool(raw_2006) - pool_means) / pool_sds
+z_2025 <- (impute_pool(raw_2025) - pool_means) / pool_sds
+
+pc2_drivers <- tibble(
+  code         = pool_features,
+  raw_2006     = raw_2006,
+  raw_2025     = raw_2025,
+  delta_z      = z_2025 - z_2006,
+  loading      = loadings_pc2_pool,
+  contribution = loadings_pc2_pool * (z_2025 - z_2006)
+) %>%
+  arrange(desc(abs(contribution))) %>%
+  left_join(
+    vdem_codebook %>%
+      transmute(code = tag, name) %>%
+      distinct(code, .keep_all = TRUE),
+    by = "code"
+  )
+
+top_drivers <- pc2_drivers %>%
+  slice_head(n = n_top_drivers)
+
+cat(sprintf("Total PC2 change 2006 -> 2025 (pooled PCA): %+.3f\n",
+            sum(pc2_drivers$contribution, na.rm = TRUE)))
+cat(sprintf("Top %d drivers explain %.1f%% of the absolute movement.\n",
+            n_top_drivers,
+            100 * sum(abs(top_drivers$contribution), na.rm = TRUE) /
+                  sum(abs(pc2_drivers$contribution),  na.rm = TRUE)))
+```
+
+```{r pc2-drivers-table}
+top_drivers %>%
+  transmute(Tag           = code,
+            Indicator     = name,
+            `2006 (raw)`  = ifelse(is.na(raw_2006), "—",
+                                    sprintf("%.2f", raw_2006)),
+            `2025 (raw)`  = ifelse(is.na(raw_2025), "—",
+                                    sprintf("%.2f", raw_2025)),
+            `Delta z`     = round(delta_z, 2),
+            `PC2 loading` = round(loading, 3),
+            `Contribution` = round(contribution, 3)) %>%
+  kable(caption = sprintf("Top %d V-Dem indicators by contribution to Cambodia's pooled-PC2 change, 2006 to 2025. Raw values are V-Dem native units (— = NA in that year, imputed to the pool mean before z-scoring). Contribution = loading * (z_2025 - z_2006); positive = pushed PC2 up = state encompasses society more.",
+                          n_top_drivers))
+```
+
+```{r pc2-drivers-plot, fig.width=7.4, fig.height=8.5, out.width="100%"}
+top_codes <- top_drivers$code
+
+driver_panel <- vdem_raw %>%
+  filter(country_name == "Cambodia",
+         year >= 1970, year <= 2025) %>%
+  select(year, all_of(top_codes)) %>%
+  pivot_longer(-year, names_to = "code", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  left_join(
+    top_drivers %>%
+      transmute(code,
+                facet_label = sprintf("%s\n(%s, contrib %+.2f)",
+                                       name, code, contribution),
+                contribution),
+    by = "code"
+  ) %>%
+  mutate(facet_label = factor(facet_label,
+                              levels = sprintf("%s\n(%s, contrib %+.2f)",
+                                               top_drivers$name,
+                                               top_drivers$code,
+                                               top_drivers$contribution)))
+
+ggplot(driver_panel, aes(year, value)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.3) +
+  geom_line(linewidth = 0.6, color = highlight) +
+  geom_point(size = 0.8, color = highlight) +
+  facet_wrap(~ facet_label, ncol = 3, scales = "free_y") +
+  scale_x_continuous(breaks = seq(1970, 2025, 15)) +
+  labs(x = NULL, y = "V-Dem score (raw, native units)",
+       title = sprintf("Top %d drivers of %s's pooled-PC2 shift, 2006-2025",
+                       n_top_drivers, cname),
+       subtitle = "Each panel: raw V-Dem score over time. Sign of contribution shown in panel title (+ = pushed PC2 up = state encompasses society more; - = pushed it down = society encompasses state more). Vertical dashes: growth breaks.") +
+  theme(strip.text = element_text(size = 7.2, lineheight = 0.9),
+        panel.spacing = unit(0.6, "lines"))
+
+ggsave("imgs/cambodia/khm_pc2_top_drivers.png",
+       width = 9, height = 11, dpi = 300)
+```
+
+```{r pc2-drivers-persist}
+write_csv(pc2_drivers, "outputs/cambodia_pc2_drivers_2006_2025.csv")
+```
+
+\newpage
+
+# Rents space and political settlement, Cambodia and peers
+
+We bring in two views from `analyses/deals-development.Rmd` — the
+4×6 stakeholder × policy-demand satisfaction grid (PSW's rents space)
+and the horizontal × vertical political-settlement scatter — and focus
+both on Cambodia plus three peer cohorts:
+
+- **Institutional peers** — Cambodia's nearest neighbours in the 2025
+  V-Dem country space (top 4 from the peers table above).
+- **Geographic peers** — its mainland and maritime ASEAN neighbours.
+- **Economic peers** — countries within ±25% of Cambodia's 2023
+  GDP-per-capita (PWT 11.0), excluding ones already picked up by the
+  other cohorts.
+
+The deals-development pipeline writes its per-country axis scores and
+settlement scores to CSV, so we just load those rather than re-fitting.
+
+```{r build-peer-set, cache=TRUE, dependson="nearest-peers"}
+deals_axes <- read_csv("outputs/deals_axis_scores.csv",
+                       show_col_types = FALSE)
+settle_scores <- read_csv("outputs/settlement_scores.csv",
+                          show_col_types = FALSE)
+
+name_iso <- deals_axes %>% select(country_name, iso3) %>% distinct()
+
+# --- Institutional peers: top 4 in 2025 V-Dem country space ---
+institutional_iso <- peers_long %>%
+  filter(year == 2025) %>%
+  slice_head(n = 4) %>%
+  inner_join(name_iso, by = c("country" = "country_name")) %>%
+  pull(iso3)
+
+# --- Geographic peers: ASEAN minus Brunei ---
+geographic_iso <- c("VNM", "LAO", "THA", "MMR", "MYS", "IDN", "PHL", "SGP")
+
+# --- Economic peers: GDP-per-capita within +/- 25% of Cambodia in 2023 ---
+khm_gdp_pc_2023 <- pwt %>%
+  filter(countrycode == "KHM", year == 2023) %>%
+  mutate(gdp_pc = rgdpna / pop) %>% pull(gdp_pc)
+
+econ_candidates <- pwt %>%
+  filter(year == 2023, !is.na(rgdpna), !is.na(pop), pop > 1) %>%
+  mutate(gdp_pc = rgdpna / pop) %>%
+  filter(countrycode != "KHM",
+         abs(gdp_pc - khm_gdp_pc_2023) / khm_gdp_pc_2023 < 0.25) %>%
+  arrange(abs(gdp_pc - khm_gdp_pc_2023))
+
+# Drop ones already in institutional/geographic; keep up to 4
+already <- c(institutional_iso, geographic_iso)
+economic_iso <- econ_candidates %>%
+  filter(!countrycode %in% already) %>%
+  slice_head(n = 4) %>%
+  pull(countrycode)
+
+peer_set <- bind_rows(
+  tibble(iso3 = "KHM",            group_raw = "Cambodia"),
+  tibble(iso3 = institutional_iso, group_raw = "Institutional"),
+  tibble(iso3 = geographic_iso,    group_raw = "Geographic"),
+  tibble(iso3 = economic_iso,      group_raw = "Economic")
+) %>%
+  mutate(group_order = case_when(
+    group_raw == "Cambodia"      ~ 1L,
+    group_raw == "Institutional" ~ 2L,
+    group_raw == "Geographic"    ~ 3L,
+    group_raw == "Economic"      ~ 4L
+  )) %>%
+  group_by(iso3) %>%
+  slice_min(group_order, n = 1, with_ties = FALSE) %>%   # dedupe, keep first cohort
+  ungroup() %>%
+  inner_join(name_iso, by = "iso3") %>%
+  arrange(group_order, country_name) %>%
+  mutate(group = factor(group_raw,
+                        levels = c("Cambodia", "Institutional",
+                                   "Geographic", "Economic")))
+
+peer_iso <- peer_set$iso3
+```
+
+```{r peer-set-table}
+peer_set %>%
+  transmute(Group   = group_raw,
+            ISO3    = iso3,
+            Country = country_name) %>%
+  kable(caption = sprintf("Peer set used in the rents-grid and political-settlement charts (n = %d). Each country appears in its first matching cohort only.",
+                          length(peer_iso)))
+```
+
+## Rents-space report card
+
+For each country in the peer set we colour the 4 (stakeholder) × 6
+(policy demand) grid by where the country sits on each policy-demand
+axis: red = bottom third of the world distribution, yellow = middle
+third, green = top third. Cells where the stakeholder doesn't demand
+that policy are left blank (the demand structure is in PSW's Table 1.1
+as encoded in `deals-development.Rmd`).
+
+Reading down a column tells you which stakeholder coalitions would be
+served by the country's strongest policies; reading across a row tells
+you whether a given stakeholder's whole bundle is satisfied. The
+Cambodia panel comes first; institutional peers next, then ASEAN,
+then GDP-per-capita peers.
+
+```{r rents-grid-build}
+psw_prefs <- tribble(
+  ~stakeholder,
+  ~transparent_rules, ~common_infra, ~specialized_infra,
+  ~contract_enforcement, ~subsidies_clientelism, ~exclusivity,
+  "Magicians",    1, 1, 1, 1, 1, 0,
+  "Workhorses",   1, 1, 0, 1, 0, 0,
+  "Rentiers",     0, 0, 1, 1, 1, 1,
+  "Powerbrokers", 0, 0, 0, 0, 0, 1
+)
+
+stakeholder_levels <- c("Magicians", "Workhorses", "Rentiers", "Powerbrokers")
+axis_levels <- c("transparent_rules", "common_infra", "specialized_infra",
+                 "contract_enforcement", "subsidies_clientelism", "exclusivity")
+axis_short_labels <- c(
+  transparent_rules     = "Transp. rules",
+  common_infra          = "Common infra",
+  specialized_infra     = "Special. infra",
+  contract_enforcement  = "Contract enf.",
+  subsidies_clientelism = "Subsidies",
+  exclusivity           = "Exclusivity"
+)
+
+psw_prefs_long <- psw_prefs %>%
+  pivot_longer(-stakeholder, names_to = "axis", values_to = "demanded") %>%
+  mutate(stakeholder = factor(stakeholder, levels = stakeholder_levels),
+         axis        = factor(axis, levels = axis_levels))
+
+axis_long <- deals_axes %>%
+  filter(iso3 %in% peer_iso) %>%
+  pivot_longer(-c(country_name, iso3),
+               names_to = "axis", values_to = "axis_score") %>%
+  mutate(axis = factor(axis, levels = axis_levels))
+
+country_order_levels <- peer_set$country_name
+
+rents_grid <- expand_grid(
+  iso3        = peer_iso,
+  stakeholder = factor(stakeholder_levels, levels = stakeholder_levels),
+  axis        = factor(axis_levels, levels = axis_levels)
+) %>%
+  inner_join(psw_prefs_long, by = c("stakeholder", "axis")) %>%
+  left_join(axis_long %>% select(iso3, axis, axis_score),
+            by = c("iso3", "axis")) %>%
+  inner_join(peer_set %>% select(iso3, country_name, group),
+             by = "iso3") %>%
+  mutate(
+    band = case_when(
+      demanded == 0     ~ NA_character_,
+      is.na(axis_score) ~ "Missing",
+      axis_score < 1/3  ~ "Bottom third",
+      axis_score < 2/3  ~ "Middle third",
+      TRUE              ~ "Top third"
+    ),
+    band = factor(band,
+                  levels = c("Bottom third", "Middle third",
+                             "Top third", "Missing")),
+    facet_label = sprintf("%s (%s)", country_name, group),
+    facet_label = factor(facet_label,
+                         levels = sprintf("%s (%s)",
+                                          peer_set$country_name,
+                                          peer_set$group))
+  )
+
+rents_palette <- c(
+  "Bottom third" = "#d73027",
+  "Middle third" = "#fee08b",
+  "Top third"    = "#1a9850",
+  "Missing"      = "grey60"
+)
+```
+
+```{r rents-grid-plot, fig.width=7.4, fig.height=8.8, out.width="100%"}
+ggplot(rents_grid,
+       aes(x = axis, y = fct_rev(stakeholder), fill = band)) +
+  geom_tile(color = "white", linewidth = 0.6, na.rm = FALSE) +
+  facet_wrap(~ facet_label, ncol = 3) +
+  scale_fill_manual(values = rents_palette,
+                    na.value = NA, drop = FALSE) +
+  scale_x_discrete(labels = axis_short_labels) +
+  labs(x = NULL, y = NULL, fill = NULL,
+       title = sprintf("Policy-demand satisfaction matrix — %s and peers",
+                       cname),
+       subtitle = "Coloured = stakeholder demands this policy; blank = no demand. Bands are world-wide percentile thirds on each policy-demand axis.") +
+  theme(legend.position = "bottom",
+        axis.text.x = element_text(size = 7, angle = 45, hjust = 1, vjust = 1),
+        axis.text.y = element_text(size = 8),
+        strip.text  = element_text(size = 8, face = "bold"))
+
+ggsave("imgs/cambodia/rents_grid_khm_peers.png",
+       width = 9, height = 11, dpi = 300)
+```
+
+\newpage
+
+## Political settlement — horizontal × contested (PC2 overlay)
+
+The companion view from `deals-development.Rmd` swaps the elite-mass
+vertical axis for *managed-vs-contested*: the within-world percentile
+of PC2 from the institutional-complexity PCA on the 2025 V-Dem
+cross-section. High PC2 = anti-system mobilization, polarization,
+political violence (Pakistan, Lebanon); low PC2 = political conflict
+absorbed by institutions (Singapore, China, Saudi Arabia). The
+quadrants map onto Khan's typology more directly than the elite-mass
+read does.
+
+```{r settlement-scatter-pc2, fig.width=6.5, fig.height=6.5, out.width="100%"}
+inst_pca_pct <- read_csv("outputs/institutional_pca_scores.csv",
+                         show_col_types = FALSE) %>%
+  select(country_name, PC2_pct)
+
+settle_with_pc2 <- settle_scores %>%
+  left_join(inst_pca_pct, by = "country_name") %>%
+  mutate(contested = PC2_pct / 100) %>%
+  filter(!is.na(contested)) %>%
+  left_join(peer_set %>% select(iso3, group), by = "iso3")
+
+group_palette <- c(
+  "Cambodia"      = highlight,
+  "Institutional" = "#266798",
+  "Geographic"    = "#36B250",
+  "Economic"      = "#EAC218"
+)
+
+quadrant_labels <- tibble(
+  label = c("Competitive\nclientelist",
+            "Vulnerable\nauthoritarian\ncoalition",
+            "Consolidated\ndemocracy",
+            "Dominant\nparty"),
+  x     = c(0.05, 0.95, 0.05, 0.95),
+  y     = c(0.97, 0.97, 0.03, 0.03),
+  hjust = c(0,    1,    0,    1),
+  vjust = c(1,    1,    0,    0)
+)
+
+ggplot(settle_with_pc2, aes(horizontal, contested)) +
+  geom_vline(xintercept = 0.5, linetype = "dashed",
+             color = "grey50", alpha = 0.4) +
+  geom_hline(yintercept = 0.5, linetype = "dashed",
+             color = "grey50", alpha = 0.4) +
+  geom_text(data = quadrant_labels,
+            aes(x = x, y = y, label = label,
+                hjust = hjust, vjust = vjust),
+            color = "grey45", size = 2.4, lineheight = 0.9,
+            inherit.aes = FALSE) +
+  geom_point(data = ~ filter(.x, is.na(group)),
+             color = "grey75", alpha = 0.45, size = 1.0) +
+  geom_point(data = ~ filter(.x, !is.na(group)),
+             aes(color = group), size = 2.6) +
+  geom_text_repel(data = ~ filter(.x, !is.na(group)),
+                  aes(label = iso3, color = group),
+                  size = 3, fontface = "bold",
+                  max.overlaps = 30, segment.alpha = 0.4) +
+  scale_color_manual(values = group_palette, drop = FALSE) +
+  scale_x_continuous(limits = c(0, 1),
+                     labels = scales::percent_format(accuracy = 1),
+                     breaks = c(0, 0.5, 1)) +
+  scale_y_continuous(limits = c(0, 1),
+                     labels = scales::percent_format(accuracy = 1),
+                     breaks = c(0, 0.5, 1)) +
+  labs(x = "Horizontal: concentration among political groups (high = one dominant)",
+       y = "Contested state (high = mobilized / chaotic politics, low = managed)",
+       color = NULL,
+       title = sprintf("Political settlement — %s and peers", cname),
+       subtitle = "Horizontal: within-world percentile of group concentration. Vertical: within-world percentile of PC2 from the 2025 institutional-complexity PCA.") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/cambodia/settlement_horiz_pc2_khm_peers.png",
+       width = 9, height = 9, dpi = 300)
+```
+
+\newpage
+
+# Regime classification over time
+
+V-Dem's `v2x_regime` is the four-category Regimes of the World typology:
+0 = closed autocracy, 1 = electoral autocracy, 2 = electoral democracy,
+3 = liberal democracy. We plot Cambodia's series with the growth-break
+years overlaid.
+
+```{r khm-regime-classification, fig.height=3.8}
+khm_regime <- vdem_raw %>%
+  filter(country_name == "Cambodia", year >= 1970, !is.na(v2x_regime)) %>%
+  select(year, v2x_regime) %>%
+  arrange(year)
+
+regime_levels <- c("Closed\nautocracy", "Electoral\nautocracy",
+                   "Electoral\ndemocracy", "Liberal\ndemocracy")
+
+ggplot(khm_regime, aes(year, v2x_regime)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_step(linewidth = 0.8, color = highlight) +
+  geom_point(size = 1.2, color = highlight) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  scale_y_continuous(breaks = 0:3, labels = regime_levels,
+                     limits = c(-0.2, 3.2)) +
+  labs(x = NULL, y = NULL,
+       title = sprintf("%s regime classification, 1970-%d",
+                       cname, max(khm_regime$year)),
+       subtitle = "V-Dem Regimes of the World (v2x_regime). Vertical dashes mark growth breaks.")
+
+ggsave("imgs/cambodia/khm_regime_classification.png",
+       width = 9, height = 4.5, dpi = 300)
+```
+
+\newpage
+
+# Winning coalition size
+
+The Bueno de Mesquita & Smith (2022) winning-coalition index `W` is the mean
+of four z-scored V-Dem components (z-scores computed across all country-year
+observations): election-monitoring autonomy (`v2elembaut`), opposition-party
+autonomy (`v2psoppaut`), barriers to political-party participation
+(`v2psbars`), and the negated maximum of the three closed-succession indices
+(`v2x_ex_hereditary`, `v2x_ex_military`, `v2x_ex_party`). Higher `W` =
+larger winning coalition. See `analyses/winning_coalition.R` for the
+construction.
+
+```{r winning-coalition-build, cache=TRUE}
+zscore <- function(x) (x - mean(x, na.rm = TRUE)) / sd(x, na.rm = TRUE)
+
+w_panel <- vdem_raw %>%
+  select(country_name, year,
+         v2elembaut, v2psoppaut, v2psbars,
+         v2x_ex_hereditary, v2x_ex_military, v2x_ex_party) %>%
+  mutate(closed_succession = -pmax(v2x_ex_hereditary,
+                                   v2x_ex_military,
+                                   v2x_ex_party,
+                                   na.rm = FALSE),
+         z_elembaut = zscore(v2elembaut),
+         z_oppaut   = zscore(v2psoppaut),
+         z_bars     = zscore(v2psbars),
+         z_succ     = zscore(closed_succession)) %>%
+  rowwise() %>%
+  mutate(W = mean(c(z_elembaut, z_oppaut, z_bars, z_succ),
+                  na.rm = FALSE)) %>%
+  ungroup() %>%
+  select(country_name, year, W)
+```
+
+```{r khm-winning-coalition, fig.height=3.8}
+khm_w <- w_panel %>%
+  filter(country_name == "Cambodia", year >= 1970, !is.na(W))
+
+ggplot(khm_w, aes(year, W)) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.3) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.8, color = highlight) +
+  scale_x_continuous(breaks = seq(1970, 2025, 5)) +
+  labs(x = NULL, y = "W (z-score units)",
+       title = sprintf("%s winning coalition size, 1970-%d",
+                       cname, max(khm_w$year)),
+       subtitle = "BdM & Smith (2022) index. Higher = larger winning coalition. Vertical dashes mark growth breaks.")
+
+ggsave("imgs/cambodia/khm_winning_coalition.png",
+       width = 9, height = 4.5, dpi = 300)
+```
+
+\newpage
+
+## Peer trajectories
+
+The same index for every country that appeared as one of Cambodia's ten
+nearest peers at any of the 1970, 1979, 1987, 1997, or 2006 snapshots.
+
+```{r khm-peers-winning-coalition, fig.width=6.5, fig.height=9, out.width="100%"}
+peer_countries <- peers_long %>% pull(country) %>% unique()
+
+peers_w <- w_panel %>%
+  filter(country_name %in% peer_countries, year >= 1970, !is.na(W))
+
+ggplot(peers_w, aes(year, W)) +
+  geom_hline(yintercept = 0, color = "grey60", linewidth = 0.3) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.6, color = highlight) +
+  facet_wrap(~ country_name, ncol = 5) +
+  scale_x_continuous(breaks = c(1980, 2000, 2020)) +
+  labs(x = NULL, y = "W (z-score units)",
+       title = "Peer winning-coalition trajectories, 1970-2025",
+       subtitle = sprintf("%d distinct nearest-peer countries of %s across the 1970-2006 snapshots. Vertical dashes: %s growth breaks.",
+                          length(peer_countries), cname, cname))
+
+ggsave("imgs/cambodia/khm_peers_winning_coalition.png",
+       width = 9, height = 12, dpi = 300)
+```
+
+\newpage
+
+# Tax revenue composition
+
+IMF World Revenue Longitudinal Database (WoRLD, 2026 release). Cambodia
+coverage begins in 1999, just after the post-UNTAC fiscal regime stabilised.
+Values are % of GDP. The four tax aggregates are income taxes (`TaxInc`),
+goods & services / VAT (`TaxSal`), international trade / customs (`TaxTra`),
+and a small residual of property + other taxes (`TaxPro` + `TaxOth`).
+
+```{r khm-tax-load, cache=TRUE}
+imf_world <- suppressMessages(
+  readxl::read_excel("data/shared-data/world-imf2026.xlsx",
+                     sheet = "Data", guess_max = 20000)
+)
+
+khm_tax <- imf_world %>%
+  filter(ISO3 == "KHM") %>%
+  mutate(TaxOthAll = coalesce(TaxPro, 0) + coalesce(TaxOth, 0)) %>%
+  select(year, TaxInc, TaxSal, TaxTra, TaxOthAll, TaxRev) %>%
+  filter(!is.na(TaxRev))
+
+khm_tax_long <- khm_tax %>%
+  select(-TaxRev) %>%
+  pivot_longer(-year, names_to = "component", values_to = "pct_gdp") %>%
+  mutate(component = recode(component,
+    "TaxInc"    = "Income taxes",
+    "TaxSal"    = "Goods & services (VAT/sales)",
+    "TaxTra"    = "International trade",
+    "TaxOthAll" = "Property + other"
+  ),
+  component = factor(component, levels = c(
+    "International trade", "Goods & services (VAT/sales)",
+    "Income taxes", "Property + other"
+  )))
+```
+
+```{r khm-tax-stacked, fig.height=4.5}
+ggplot(khm_tax_long, aes(year, pct_gdp, fill = component)) +
+  geom_vline(xintercept = break_years,
+             color = "grey40", linetype = "dashed", linewidth = 0.4) +
+  geom_area(alpha = 0.92) +
+  scale_x_continuous(breaks = seq(1999, 2025, 4),
+                     limits = c(min(khm_tax_long$year),
+                                max(khm_tax_long$year))) +
+  scale_y_continuous(labels = scales::label_percent(scale = 1, accuracy = 1)) +
+  labs(x = NULL, y = "% of GDP", fill = NULL,
+       title = sprintf("%s tax revenue composition, %d-%d",
+                       cname,
+                       min(khm_tax_long$year),
+                       max(khm_tax_long$year)),
+       subtitle = "Source: IMF WoRLD 2026. Vertical dashes mark growth breaks.") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/cambodia/khm_tax_composition_pct_gdp.png",
+       width = 9, height = 5, dpi = 300)
+```
+
+The level rises from ~7% of GDP in 1999 to a 2017-2019 peak around 14-16%,
+then stabilises through the COVID period. The composition shift is the
+clearer story: international-trade taxes were the single largest source in
+1999 (~3.2% of GDP, ~45% of tax revenue) and have since fallen in both
+absolute and share terms as Cambodia entered ASEAN trade arrangements and
+joined the WTO (2004). VAT / sales taxes took over as the dominant base.
+
+```{r khm-tax-shares, fig.height=4}
+khm_tax_shares <- khm_tax %>%
+  mutate(across(c(TaxInc, TaxSal, TaxTra, TaxOthAll),
+                ~ .x / TaxRev)) %>%
+  select(-TaxRev) %>%
+  pivot_longer(-year, names_to = "component", values_to = "share") %>%
+  mutate(component = recode(component,
+    "TaxInc"    = "Income taxes",
+    "TaxSal"    = "Goods & services (VAT/sales)",
+    "TaxTra"    = "International trade",
+    "TaxOthAll" = "Property + other"
+  ),
+  component = factor(component, levels = c(
+    "Goods & services (VAT/sales)", "International trade",
+    "Income taxes", "Property + other"
+  )))
+
+ggplot(khm_tax_shares, aes(year, share, color = component)) +
+  geom_vline(xintercept = break_years,
+             color = "grey70", linetype = "dashed", linewidth = 0.4) +
+  geom_line(linewidth = 0.9) +
+  scale_x_continuous(breaks = seq(1999, 2025, 4)) +
+  scale_y_continuous(labels = scales::label_percent(accuracy = 1),
+                     limits = c(0, NA)) +
+  labs(x = NULL, y = "Share of tax revenue", color = NULL,
+       title = sprintf("%s tax mix, share of total tax revenue", cname),
+       subtitle = "Source: IMF WoRLD 2026. Vertical dashes mark growth breaks.") +
+  theme(legend.position = "bottom")
+
+ggsave("imgs/cambodia/khm_tax_shares.png",
+       width = 9, height = 5, dpi = 300)
+```
+
