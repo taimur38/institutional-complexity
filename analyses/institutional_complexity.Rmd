@@ -2090,44 +2090,92 @@ for (cname in focus_countries) {
 
 ## What Makes Each Country Distinct?
 
-For each focus country, we show its most extreme features — the indicators where it scores
-furthest from the global mean. These are the features that most define the country's
-institutional character, whether strengths or weaknesses.
+For each focus country we tabulate the indicators where it sits furthest from the
+global mean — *segmented by V-Dem category*. Categories are ordered by the country's
+mean |z| within them, so the most-distinctive institutional domains appear first.
+Within each category we show the top features by absolute deviation. The `z` column
+is colour-coded by **text color**: blue = above the global mean, red = below, with
+saturation rising with |z| (small deviations stay grey, large ones go bold and bright)
+so the eye is drawn to the largest deviations.
 
-```{r country-distinct-features, fig.width=6.5, fig.height=9, results='asis'}
+```{r country-distinct-features, results='asis'}
+n_per_cat   <- 4
+min_per_cat <- 4
+z_clip      <- 4   # symmetric range for the colour scale
+
 global_means <- colMeans(Mcp)
-global_sds <- apply(Mcp, 2, sd)
+global_sds   <- apply(Mcp, 2, sd)
+
+cat_sizes <- indicator_info %>% count(category, name = "n_ind")
+keep_cats <- cat_sizes %>% filter(n_ind >= min_per_cat) %>% pull(category)
+
+# Text-color scale: grey at z=0, saturated red/blue at the extremes.
+z_color <- scales::col_numeric(
+  palette = c(highlight, "#BFBFBF", gl$brand_blue),
+  domain  = c(-z_clip, z_clip)
+)
+
+# Build a coloured z cell using raw \textcolor (needs only xcolor, which the
+# GL header already loads). We bypass kableExtra entirely so no extra LaTeX
+# packages (colortbl, multirow) are required.
+make_z_cell <- function(z) {
+  zc       <- pmax(pmin(z, z_clip), -z_clip)
+  hex      <- sub("^#", "", z_color(zc))
+  z_str    <- sprintf("%+.2f", z)
+  emphasis <- ifelse(abs(z) > 1.5,
+                     paste0("\\textbf{", z_str, "}"),
+                     z_str)
+  paste0("\\textcolor[HTML]{", hex, "}{", emphasis, "}")
+}
 
 for (cname in focus_countries) {
-  scores <- Mcp[cname, ]
+  scores   <- Mcp[cname, ]
   z_scores <- (scores - global_means) / global_sds
 
-  extremes <- tibble(
+  d_full <- tibble(
     indicator = names(scores),
-    score = scores,
-    z = z_scores
+    score     = unname(scores),
+    z         = unname(z_scores)
   ) %>%
     left_join(indicator_info, by = c("indicator" = "code")) %>%
-    arrange(z)
+    filter(category %in% keep_cats)
 
-  # Top 10 highest and lowest
-  top10 <- bind_rows(
-    extremes %>% head(10) %>% mutate(end = "Lowest"),
-    extremes %>% tail(10) %>% mutate(end = "Highest")
-  ) %>%
+  cat_order <- d_full %>%
+    group_by(category) %>%
+    summarise(mean_abs_z = mean(abs(z)), .groups = "drop") %>%
+    arrange(desc(mean_abs_z)) %>%
+    pull(category)
+
+  d_top <- d_full %>%
+    group_by(category) %>%
+    slice_max(abs(z), n = n_per_cat, with_ties = FALSE) %>%
+    ungroup() %>%
+    mutate(category = factor(category, levels = cat_order)) %>%
+    arrange(category, desc(z)) %>%
     mutate(
-      label = str_trunc(description, 45),
-      label = fct_reorder(label, z)
+      z_cell     = make_z_cell(z),
+      score_cell = sprintf("%.2f", score)
     )
 
-  p <- ggplot(top10, aes(x = z, y = label, fill = end)) +
-    geom_col(show.legend = FALSE) +
-    geom_vline(xintercept = 0, color = gl$text_dark, linewidth = 0.3) +
-    scale_fill_manual(values = c("Lowest" = highlight, "Highest" = gl$brand_blue)) +
-    labs(x = "Standard deviations from global mean", y = NULL)
-
   cat("\n\n### ", cname, "\n\n", sep = "")
-  print(p)
+
+  for (cat_name in cat_order) {
+    sub <- d_top %>% filter(category == cat_name)
+    if (nrow(sub) == 0) next
+
+    cat("\n\n**", as.character(cat_name), "**\n\n", sep = "")
+
+    tbl <- sub %>%
+      transmute(
+        Indicator = str_trunc(description, 55),
+        Score     = score_cell,
+        `z`       = z_cell
+      )
+
+    print(kable(tbl, format = "latex", booktabs = TRUE, escape = FALSE,
+                align = "lrr",
+                col.names = c("Indicator", "Score (0--1)", "z (vs global)")))
+  }
 }
 ```
 
