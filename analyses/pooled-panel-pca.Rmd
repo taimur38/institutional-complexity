@@ -1,0 +1,682 @@
+---
+title: "Pooled-Panel PCA"
+subtitle: "Institutional axes that hold up across 1970-2025"
+author: "Institutional Complexity Project"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 3
+    fig_width: 6.5
+    fig_height: 4.5
+    latex_engine: xelatex
+    includes:
+      in_header: ~/dev/gl-design/skills/gl-ggplot/assets/gl_pdf.tex
+---
+
+```{r setup, include=FALSE}
+knitr::opts_knit$set(root.dir = normalizePath(".."))
+knitr::opts_chunk$set(
+  echo = FALSE,
+  message = FALSE,
+  warning = FALSE,
+  fig.align = "center",
+  cache = TRUE,
+  cache.lazy = FALSE
+)
+```
+
+```{r packages, cache=FALSE}
+library(tidyverse)
+library(arrow)
+library(ggrepel)
+library(knitr)
+library(patchwork)
+```
+
+```{r gl-setup, cache=FALSE}
+source("~/dev/gl-design/skills/gl-ggplot/assets/theme_gl.R")
+gl_setup()
+```
+
+# Why pool
+
+The country-space writeup builds a fresh PCA on **only** the 2025 V-Dem
+cross-section. The cambodia-analysis trajectory chart then projects 1970-2024
+data through that 2025 PCA and reads off PC2 over time. The driver decomposition
+on Cambodia 2006-2025 surfaced the cost of that choice: 9 of the 12 top PC2
+movers belong to V-Dem's Digital Society Survey (`v2sm*`), a module that
+didn't exist before 2000 and accounts for ~39% of the absolute contribution
+mass to PC2 (vs. its 18% share of the feature set). Fitting on 2025 means the
+PCA's axes inherit 2025's variance structure — a structure dominated by a
+post-2000 module that for two-thirds of the trajectory we project through is
+entirely imputed.
+
+A pooled-panel PCA addresses this directly. We stack every (country, year)
+observation from 1970-2025 into one tall matrix, z-score across the pool, and
+fit one PCA. The loadings then reflect variance over the **whole window we
+care about**, not the present. Indicators with sparse historical coverage
+contribute less to the loading geometry because their pool-wide variance is
+small (they're approximately constant at the imputed mean for half the panel).
+
+What we lose: the exact scaling of axis units in any single year is no longer
+a "within-year SD" — it's a "within-pool SD". That's fine for the questions
+we want to ask of these axes ("how big a move is Cambodia 2006 → 2025
+relative to the kinds of moves countries make in this dataset?").
+
+# Data
+
+```{r load-vdem, cache=TRUE}
+vdem_raw      <- read_parquet("data/shared-data/vdem/vdem.parquet")
+vdem_codebook <- read_parquet("data/shared-data/vdem/vdem_codebook.parquet")
+```
+
+```{r panel-window}
+panel_start <- 1970
+panel_end   <- vdem_raw %>%
+  filter(year >= 2020) %>%
+  group_by(year) %>%
+  summarise(n_countries = n_distinct(country_name), .groups = "drop") %>%
+  filter(n_countries >= 150) %>%
+  pull(year) %>% max()
+
+cat(sprintf("Panel window: %d-%d\n", panel_start, panel_end))
+```
+
+## Indicator selection
+
+We mirror the country-space writeup's filter:
+
+- vartype `"C"` only (component-type IRT scores; aggregates would double-count)
+- drop the two discrete-categorical components V-Dem ships (`v2regopploc`,
+  `v2regsuploc`)
+- drop the 18 conceptually-redundant indicators flagged in
+  `outputs/redundancy_clusters_2025.csv`
+- drop the suffix variants (`_codelow`, `_codehigh`, `_sd`, `_osp`, `_ord`,
+  `_mean`, `_nr`, `_rec`) and per-rater columns (`_1`, `_2`, ...)
+
+The new piece: a **panel-wide coverage filter**. An indicator must be
+observed in at least 50% of (country, year) cells across the 1970-`r panel_end`
+panel. This is the rule that decides whether the Digital Society Survey
+indicators (`v2sm*`, coded only 2000-`r panel_end`) survive — they're observed
+in roughly `r round(100 * (panel_end - 1999) / (panel_end - panel_start + 1))`%
+of years, which is right at the threshold.
+
+```{r indicator-filter, cache=TRUE}
+discrete_vars <- c("v2regopploc", "v2regsuploc")
+
+redundant_drops <- c(
+  "v2cldmovew", "v2cldiscw", "v2clslavef", "v2clprptyw", "v2clacjstw",
+  "v2juncind", "v2juhccomp", "v2csrlgrep", "v2csrlgcon", "v2exdfdmhs",
+  "v2smgovsm", "v2lgqstexp", "v2lglegplo", "v2merange", "v2dlreason",
+  "v2psoppaut", "v2cafexch", "v2caconmob"
+)
+
+suffixes      <- c("_codelow", "_codehigh", "_sd", "_osp",
+                   "_ord", "_mean", "_nr", "_rec")
+all_cols      <- names(vdem_raw)
+is_suffix     <- vapply(all_cols, function(x)
+                        any(vapply(suffixes, endsWith, logical(1), x = x)),
+                        logical(1))
+is_numbered   <- grepl("_\\d+$", all_cols)
+base_cols     <- all_cols[!is_suffix & !is_numbered]
+
+component_codes <- vdem_codebook %>%
+  filter(vartype == "C") %>% pull(tag) %>% unique()
+
+candidate_codes <- intersect(component_codes, base_cols) %>%
+  setdiff(discrete_vars) %>%
+  setdiff(redundant_drops)
+
+candidate_codes <- candidate_codes[
+  vapply(candidate_codes, function(x) is.numeric(vdem_raw[[x]]), logical(1))
+]
+
+panel_window <- vdem_raw %>%
+  filter(year >= panel_start, year <= panel_end)
+
+n_cells <- nrow(panel_window)
+
+coverage <- vapply(candidate_codes,
+                   function(x) sum(!is.na(panel_window[[x]])),
+                   integer(1))
+
+coverage_threshold <- 0.5
+indicators <- candidate_codes[coverage >= coverage_threshold * n_cells]
+
+cat(sprintf("Candidate indicators: %d\n", length(candidate_codes)))
+cat(sprintf("Pass >=%.0f%% pool coverage: %d\n",
+            100 * coverage_threshold, length(indicators)))
+```
+
+```{r indicator-coverage-summary}
+prefix_categories <- c(
+  "el" = "Elections",            "ps" = "Political Parties",
+  "cl" = "Civil Liberties",      "ju" = "Judiciary",
+  "lg" = "Legislature",          "me" = "Media",
+  "ex" = "Executive",            "dl" = "Deliberation",
+  "ca" = "Mobilization & Academic", "cs" = "Civil Society",
+  "pe" = "Political Equality",   "st" = "State Capacity",
+  "sv" = "Sovereignty",          "dd" = "Direct Democracy",
+  "ed" = "Education",            "sm" = "Digital Society / Social Media",
+  "re" = "Regime",               "te" = "Technology & Media Environment"
+)
+
+cov_df <- tibble(
+  code     = candidate_codes,
+  pool_cov = coverage / n_cells,
+  prefix   = sub("^v[23](\\w{2}).*", "\\1", candidate_codes),
+  kept     = pool_cov >= coverage_threshold
+) %>%
+  mutate(category = unname(prefix_categories[prefix]),
+         category = replace_na(category, "Other"))
+
+cov_df %>%
+  count(category, kept) %>%
+  pivot_wider(names_from = kept, values_from = n,
+              values_fill = 0) %>%
+  rename(`Dropped (<50% pool cov)` = `FALSE`,
+         `Kept` = `TRUE`) %>%
+  mutate(Total = `Dropped (<50% pool cov)` + Kept) %>%
+  arrange(desc(Total)) %>%
+  kable(caption = "How the panel-coverage filter cuts each V-Dem category.")
+```
+
+```{r v2sm-coverage-note}
+sm_codes <- candidate_codes[grepl("^v2sm", candidate_codes)]
+sm_kept  <- intersect(sm_codes, indicators)
+cat(sprintf("v2sm* (Digital Society) candidates: %d\n", length(sm_codes)))
+cat(sprintf("v2sm* surviving the 50%% filter: %d\n",  length(sm_kept)))
+```
+
+The Digital Society block is largely culled; whatever survives is whatever
+V-Dem coded retroactively for some pre-2000 years.
+
+## Country-year row construction
+
+```{r build-panel, cache=TRUE}
+panel_mat_df <- panel_window %>%
+  select(country_name, year, all_of(indicators)) %>%
+  mutate(p_missing = rowSums(is.na(across(all_of(indicators)))) /
+                     length(indicators)) %>%
+  filter(p_missing < 0.5) %>%
+  select(-p_missing)
+
+cat(sprintf("Country-year rows kept: %d (of %d in window)\n",
+            nrow(panel_mat_df), n_cells))
+
+panel_mat_df %>%
+  count(year) %>%
+  ggplot(aes(year, n)) +
+  geom_col(fill = gl$brand_blue, width = 0.8) +
+  scale_x_continuous(breaks = seq(1970, panel_end, 10)) +
+  labs(x = NULL, y = "Country-years kept",
+       title = "Panel composition by year",
+       subtitle = "Rows that pass the >=50% feature-coverage filter.") +
+  theme(legend.position = "none")
+```
+
+## Imputation and z-scoring
+
+Mean-impute remaining NAs at the **pool** level (not within-year), then
+z-score each indicator across the pool. The pool-mean fill is the most
+defensible neutral value for a country-year that's missing a feature: it
+treats the imputed cell as "an average country-year on this dimension."
+
+```{r normalize, cache=TRUE}
+M_raw <- panel_mat_df %>%
+  select(all_of(indicators)) %>%
+  as.matrix()
+
+# Pool-mean imputation
+for (j in seq_len(ncol(M_raw))) {
+  na_idx <- is.na(M_raw[, j])
+  if (any(na_idx)) M_raw[na_idx, j] <- mean(M_raw[, j], na.rm = TRUE)
+}
+
+# z-score across pool
+M_z <- scale(M_raw, center = TRUE, scale = TRUE)
+M_z <- M_z[, !is.nan(colSums(M_z)), drop = FALSE]
+
+cat(sprintf("Final matrix: %d country-years x %d features\n",
+            nrow(M_z), ncol(M_z)))
+cat(sprintf("Mean per-feature SD after z-scoring (sanity, should be 1): %.3f\n",
+            mean(apply(M_z, 2, sd))))
+```
+
+# Fit the PCA
+
+```{r fit-pca, cache=TRUE}
+pca_pool <- prcomp(M_z, center = FALSE, scale. = FALSE)
+# scale.=FALSE because we already z-scored; centering is the column means of z
+# which are zero by construction.
+
+var_exp <- pca_pool$sdev^2 / sum(pca_pool$sdev^2)
+cum_var <- cumsum(var_exp)
+```
+
+## How much variance does each PC explain?
+
+```{r scree, fig.height=3.6}
+scree_df <- tibble(PC = seq_along(var_exp),
+                   var_exp = var_exp,
+                   cum_var = cum_var)
+
+p_bar <- ggplot(scree_df %>% slice(1:20),
+                aes(factor(PC), var_exp)) +
+  geom_col(fill = gl$brand_blue, width = 0.7) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(x = "PC", y = "Variance explained",
+       title = "Scree (first 20 PCs)")
+
+p_cum <- ggplot(scree_df %>% slice(1:20),
+                aes(PC, cum_var)) +
+  geom_line(linewidth = 0.7, color = gl$brand_blue) +
+  geom_point(size = 1.2, color = gl$brand_blue) +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1),
+                     limits = c(0, 1)) +
+  scale_x_continuous(breaks = c(1, 5, 10, 15, 20)) +
+  labs(x = "PC", y = "Cumulative variance",
+       title = "Cumulative variance")
+
+p_bar + p_cum
+```
+
+```{r variance-table}
+scree_df %>%
+  slice(1:10) %>%
+  transmute(PC,
+            `Eigenvalue (var)`     = round(pca_pool$sdev[1:10]^2, 2),
+            `Variance explained`   = scales::percent(var_exp, accuracy = 0.1),
+            `Cumulative variance`  = scales::percent(cum_var, accuracy = 0.1)) %>%
+  kable(caption = "First 10 principal components.")
+```
+
+The first PC absorbs the dominant democracy/autocracy axis and is large; the
+next several PCs each capture meaningful but smaller chunks. We carry PC1-PC4
+forward.
+
+# What does each PC capture?
+
+For each of the first four PCs we list the indicators with the largest
+positive and negative loadings, grouped by V-Dem category. A loading is
+the indicator's coefficient in that PC's direction in the standardized
+feature space — ie how much a one-SD move in that indicator shifts a
+country-year along this PC.
+
+```{r loadings-helper}
+codebook_lookup <- vdem_codebook %>%
+  transmute(code = tag, name) %>%
+  distinct(code, .keep_all = TRUE)
+
+loadings_df <- as_tibble(pca_pool$rotation[, 1:4],
+                          rownames = "code") %>%
+  mutate(prefix   = sub("^v[23](\\w{2}).*", "\\1", code),
+         category = unname(prefix_categories[prefix]),
+         category = replace_na(category, "Other")) %>%
+  left_join(codebook_lookup, by = "code")
+
+top_loadings <- function(pc, k = 8, side = c("pos", "neg")) {
+  side <- match.arg(side)
+  d <- loadings_df %>%
+    transmute(code, name, category, loading = .data[[pc]])
+  if (side == "pos") {
+    d %>% arrange(desc(loading)) %>% slice_head(n = k)
+  } else {
+    d %>% arrange(loading) %>% slice_head(n = k)
+  }
+}
+```
+
+```{r print-loadings, results='asis'}
+for (pc in c("PC1", "PC2", "PC3", "PC4")) {
+  cat(sprintf("\n## %s — top positive loadings\n\n", pc))
+  print(kable(top_loadings(pc, 8, "pos") %>%
+                transmute(Code = code, Indicator = name, Category = category,
+                          Loading = round(loading, 3))))
+  cat(sprintf("\n## %s — top negative loadings\n\n", pc))
+  print(kable(top_loadings(pc, 8, "neg") %>%
+                transmute(Code = code, Indicator = name, Category = category,
+                          Loading = round(loading, 3))))
+}
+```
+
+## PC2 in detail: top and bottom 15 loadings with codebook definitions
+
+PC2 is the second-most-important institutional axis after democracy and the
+one whose interpretation requires care — several top contributors have
+inverted scales, so the loading sign and the meaning of "high indicator
+score" don't line up the way the indicator names suggest. We lay out the
+top and bottom 15 PC2 loadings with V-Dem's full question text and response
+options so the reading developed in the takeaways section below is
+independently verifiable from primary materials.
+
+```{r pc2-detail-helper}
+format_indicator_block <- function(code, loading, codebook) {
+  row <- codebook[codebook$tag == code, ]
+  if (nrow(row) == 0) return(invisible(NULL))
+  row <- row[1, ]
+  cat(sprintf("\n**`%s` --- %s** (loading %+.3f)\n\n",
+              code, row$name, loading))
+  if (!is.na(row$question) && nchar(row$question) > 0)
+    cat(sprintf("*Question.* %s\n\n", row$question))
+  if (!is.na(row$responses) && nchar(row$responses) > 0)
+    cat(sprintf("*Responses.* %s\n\n", row$responses))
+}
+```
+
+### PC2 --- top 15 positive loadings
+
+These pull a country-year toward the positive pole of PC2.
+
+```{r pc2-pos15-detail, results='asis'}
+pc2_pos15 <- top_loadings("PC2", 15, "pos")
+for (i in seq_len(nrow(pc2_pos15))) {
+  format_indicator_block(pc2_pos15$code[i], pc2_pos15$loading[i], vdem_codebook)
+}
+```
+
+### PC2 --- top 15 negative loadings
+
+These pull a country-year toward the negative pole of PC2. Several
+indicators here are coded so a *high* indicator score means *less* of the
+named feature --- for example `v2psparban` (Party ban) runs 0 = "all
+parties banned" to 4 = "no parties banned", so a high indicator score (no
+bans) contributes negatively to PC2, meaning *more* party bans pull a
+country toward the *positive* pole of PC2. Each block below includes the
+full response scale so the directionality is unambiguous.
+
+```{r pc2-neg15-detail, results='asis'}
+pc2_neg15 <- top_loadings("PC2", 15, "neg")
+for (i in seq_len(nrow(pc2_neg15))) {
+  format_indicator_block(pc2_neg15$code[i], pc2_neg15$loading[i], vdem_codebook)
+}
+```
+
+## Loading mass by V-Dem category, per PC
+
+The same redundancy worry as before: a PC that draws disproportionately from
+one V-Dem family is partly capturing module-internal covariance rather than
+generic institutional structure. The table below shows, for each of the first
+four PCs, the share of squared loading mass falling in each category.
+
+```{r loading-mass-by-category}
+pc_long <- loadings_df %>%
+  pivot_longer(starts_with("PC"), names_to = "pc", values_to = "loading")
+
+pc_mass <- pc_long %>%
+  group_by(pc, category) %>%
+  summarise(sq_mass = sum(loading^2),
+            .groups = "drop") %>%
+  group_by(pc) %>%
+  mutate(pct = sq_mass / sum(sq_mass)) %>%
+  ungroup()
+
+pc_mass %>%
+  pivot_wider(id_cols = category, names_from = pc, values_from = pct,
+              values_fill = 0) %>%
+  mutate(across(starts_with("PC"),
+                ~scales::percent(.x, accuracy = 0.1))) %>%
+  arrange(desc(PC1)) %>%
+  kable(caption = "Share of squared loading mass by V-Dem category, by PC.")
+```
+
+# Sample country trajectories
+
+A pooled PCA is only useful if its axes track the substantive history we
+think we know. We project a small panel of well-known countries into PC1
+and PC2 over the full window.
+
+```{r country-pc-scores, cache=TRUE}
+panel_with_scores <- panel_mat_df %>%
+  select(country_name, year) %>%
+  bind_cols(as_tibble(pca_pool$x[, 1:5]))
+
+focus <- c("Germany", "Sweden", "United States of America", "Singapore",
+           "China", "Russia", "Cambodia", "Vietnam", "Iran",
+           "South Korea", "Poland", "Brazil", "South Africa")
+focus_scores <- panel_with_scores %>%
+  filter(country_name %in% focus) %>%
+  mutate(country_name = factor(country_name, levels = focus))
+```
+
+```{r pc1-trajectories, fig.height=4.6}
+ggplot(focus_scores, aes(year, PC1, color = country_name)) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_line(linewidth = 0.6) +
+  scale_x_continuous(breaks = seq(1970, panel_end, 10)) +
+  labs(x = NULL, y = "PC1 score (pooled)",
+       title = "PC1 trajectories, 1970-present",
+       subtitle = "Sample panel. Sign and meaning of PC1: see top-loadings table above.",
+       color = NULL) +
+  theme(legend.position = "right",
+        legend.text = element_text(size = 7))
+```
+
+```{r pc2-trajectories, fig.height=4.6}
+ggplot(focus_scores, aes(year, PC2, color = country_name)) +
+  geom_hline(yintercept = 0, color = "grey70", linewidth = 0.3) +
+  geom_line(linewidth = 0.6) +
+  scale_x_continuous(breaks = seq(1970, panel_end, 10)) +
+  labs(x = NULL, y = "PC2 score (pooled)",
+       title = "PC2 trajectories, 1970-present",
+       subtitle = "Sample panel. Sign and meaning of PC2: see top-loadings table above.",
+       color = NULL) +
+  theme(legend.position = "right",
+        legend.text = element_text(size = 7))
+```
+
+## Two-axis snapshot at year endpoints
+
+```{r endpoint-scatter, fig.width=7, fig.height=8}
+endpoint_years <- c(1970, 1995, panel_end)
+
+ep_df <- panel_with_scores %>%
+  filter(year %in% endpoint_years) %>%
+  mutate(year_lab = factor(year, levels = endpoint_years))
+
+focus_label <- c("Germany", "Sweden", "United States of America", "Singapore",
+                 "China", "Russia", "Cambodia", "Vietnam",
+                 "South Korea", "Brazil", "Pakistan", "Saudi Arabia",
+                 "Soviet Union")
+
+ggplot(ep_df, aes(PC1, PC2)) +
+  geom_hline(yintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_vline(xintercept = 0, color = "grey80", linewidth = 0.3) +
+  geom_point(color = "grey55", alpha = 0.4, size = 1.2) +
+  geom_point(data = ~ filter(.x, country_name %in% focus_label),
+             color = highlight, size = 2.2) +
+  geom_text_repel(data = ~ filter(.x, country_name %in% focus_label),
+                  aes(label = country_name),
+                  size = 2.5, color = highlight,
+                  segment.alpha = 0.4, max.overlaps = 30) +
+  facet_wrap(~ year_lab, ncol = 1) +
+  labs(x = "PC1", y = "PC2",
+       title = "Pooled-PCA snapshots at three years",
+       subtitle = "Same axes (pooled rotation) at three endpoint years. Compare layouts to read panel-PCA stability.") +
+  theme(strip.text = element_text(face = "bold"))
+```
+
+# Key takeaways: PC1 and PC2 as analytical tools
+
+The pooled PCA produces dozens of components but only the first two carry
+enough variance and conceptual coherence to deploy on case studies. Both
+have a clear interpretation that survives careful reading of the loadings.
+Together they give a two-dimensional institutional space we can use on
+individual countries to separate regime-type movement from state-building
+movement. This section codifies what each axis means and how to read
+movement on it; downstream case-study writeups should refer back here
+rather than re-deriving the interpretation each time.
+
+## PC1: openness of the regime (the democracy axis)
+
+**Positive pole.** Liberal democracy: freedom of expression and discussion,
+free press (low government censorship, low harassment of journalists, low
+media corruption), free academic and cultural expression, peaceful
+assembly, autonomous electoral management, no civil society repression,
+freedom from torture, transparent laws with predictable enforcement,
+access to justice, rigorous public administration, broad consultation in
+deliberation.
+
+**Negative pole.** Personalist/ideological autocracy with a state-
+controlled information environment: state-owned print and broadcast media
+with political influence, control of entertainment content, political
+teacher firing/hiring with no teacher autonomy or independent unions,
+person-of-the-leader and ideological executive legitimation, HOS veto and
+dissolution power in practice, state-administered mass organizations,
+mobilization for autocracy.
+
+**How to read movement.** A move on PC1 is regime change in the obvious
+sense --- democratization (positive direction) or autocratization
+(negative direction). PC1 is the axis any V-Dem PCA recovers; the pooled
+fit just confirms it's robust across the 1970--`r panel_end` window and
+not an artifact of post-2000 measurement.
+
+## PC2: stateness --- how much of social life the state encompasses
+
+This is the axis whose interpretation took work to nail down (see the
+top-15 detail above). After fixing directionality on the reverse-coded
+indicators, PC2 contrasts two opposing **modes of governance** that cut
+across regime type.
+
+**Positive pole --- "the state encompasses society."** Bundles two
+clusters that the data hold together:
+
+1. *Broad, equal public-goods delivery.* Equal access to education,
+   health, public services across income / urban-rural / social group /
+   gender; state jobs accessible across income; universalistic rather
+   than means-tested welfare. State authority over territory; uniform
+   subnational administration of elections and civil liberties. Clean
+   everyday administration (no legislative corruption, no vote-buying,
+   no electoral violence).
+2. *State control of the non-state sphere.* State-owned broadcast media;
+   state ownership of the economy; biased state-aligned media; media
+   self-censorship; government control over CSO entry and exit; low
+   university autonomy; party bans and barriers to party formation; no
+   judicial review constraining the executive.
+
+These look like opposites at first --- equality of delivery sounds
+liberal, control of the non-state sphere sounds illiberal --- but the data
+bundle them because they share a common precondition: **infrastructural
+power** in Michael Mann's sense. A state with reach to deliver basic
+services uniformly across territory is the same state with reach to
+license every broadcaster, register every CSO, supervise every
+university, and gate every party-formation rule. Encompassment cuts
+both ways.
+
+**Negative pole --- "society encompasses the state."** Private economy,
+private media, autonomous universities, autonomous CSOs, critical media,
+critical academics, judicial review constraining the executive, easy
+party formation and large opposition --- alongside political violence by
+non-state actors, anti-system CSO movements, and mass mobilization for
+democracy. The unifying thread is *non-state actors having visible
+weight*, whether that weight takes benign-constitutional form (a
+constitutional court overriding the executive) or violent-contentious
+form (insurgent movements attacking it). PC2 lumps them because both
+register as the state's encompassment of society being incomplete.
+
+**How to read movement.**
+
+- Positive PC2 movement = state-building / state-encompassment deepening
+  (administrative reach into delivery + control of the non-state sphere).
+- Negative PC2 movement = state-encompassment shrinking, either through
+  deliberate liberal-pluralist constraint (judicial review, free CSOs)
+  or through state weakening (non-state violence, contested authority).
+
+PC2 is **orthogonal to PC1 by construction**. Welfare democracies and
+developmental autocracies sit together at high PC2 (they share
+encompassment despite opposing each other on PC1). Liberal-market
+democracies and weak/contested polities sit together at low PC2 (they
+share non-state weight on the state, despite opposing each other on PC1).
+This is the empirical signature of the long-standing political-theory
+claim (Tilly, Mann, Migdal) that state capacity is a separate dimension
+from regime type.
+
+## How to deploy PC1 and PC2 in case studies
+
+When projecting a country into this space, report and read both axes
+separately. The diagnostic patterns to look for:
+
+- **Regime change with stable stateness.** PC1 moves, PC2 flat. Many
+  third-wave democratization cases --- institutions liberalize without
+  the state's reach into economy, media, civil society shifting much.
+- **State-building without democratization.** PC2 up, PC1 flat. The
+  developmental-state pattern --- encompassment deepens (administrative
+  delivery + control of non-state sphere) without regime opening.
+  Singapore, post-Doi Moi Vietnam, late-Hun-Sen Cambodia are candidates.
+- **State collapse with regime liberalization.** PC2 down, PC1 up. The
+  post-Soviet 1990s pattern --- media, parties, civil society, and
+  economy de-state-ize while the regime formally opens. Russia
+  1989--1996 is the textbook case.
+- **State reconsolidation under autocracy.** PC2 up, PC1 down. The
+  recovery from the previous pattern --- regime closes, state reabsorbs
+  media, parties, CSOs. Russia 2000s.
+
+A case-study writeup should locate the country in (PC1, PC2) space at
+endpoints, plot the trajectory, and decompose any large move into its
+PC1 and PC2 components. The four patterns above are the ones to look for;
+their absence is just as informative as their presence.
+
+# Persist outputs
+
+```{r persist}
+dir.create("outputs/pooled_pca", showWarnings = FALSE)
+
+saveRDS(list(
+  rotation    = pca_pool$rotation,
+  sdev        = pca_pool$sdev,
+  feature_means = colMeans(M_raw),
+  feature_sds   = apply(M_raw, 2, sd),
+  indicators    = colnames(M_z),
+  panel_start   = panel_start,
+  panel_end     = panel_end,
+  n_country_years = nrow(M_z)
+), "outputs/pooled_pca/pca_pool.rds")
+
+panel_with_scores %>%
+  select(country_name, year, starts_with("PC")) %>%
+  write_csv("outputs/pooled_pca/country_year_pc_scores.csv")
+
+# Loading table for downstream use
+loadings_df %>%
+  select(code, name, category, PC1, PC2, PC3, PC4) %>%
+  write_csv("outputs/pooled_pca/pca_loadings_pc1_pc4.csv")
+
+cat("Wrote: outputs/pooled_pca/pca_pool.rds\n")
+cat("Wrote: outputs/pooled_pca/country_year_pc_scores.csv (", nrow(panel_with_scores), " rows)\n", sep="")
+cat("Wrote: outputs/pooled_pca/pca_loadings_pc1_pc4.csv\n")
+```
+
+# Notes and what to read into this
+
+- **Sign convention.** PC sign is arbitrary in `prcomp`. We don't flip
+  anything in this file; if a downstream caller wants "high PC1 =
+  liberal democracy", inspect the top loadings of PC1 above and apply
+  a sign flip when reading the saved scores. The reproducible move is
+  to store both the rotation and the sign convention you settled on.
+
+- **Pooled vs. snapshot PCAs are answering different questions.**
+  Pooled = "what are the dominant institutional axes across our
+  development-relevant window?" Snapshot = "what's the shape of
+  institutional space *now*?" The 2025 snapshot embeds modules
+  (Digital Society) that are absent from most of the pool. The
+  trajectory chart in `case-studies/cambodia/cambodia-analysis.Rmd`
+  should switch to the pooled rotation if its claim is "Cambodia's
+  institutions over time."
+
+- **Coverage filter.** The 50% pool-coverage threshold is the lever
+  that decides whether `v2sm*` enters the PCA. With 50% almost all
+  v2sm indicators get dropped (they're observed in ~46% of cells).
+  Tightening to 70% is conservative; loosening to 30% would re-admit
+  them. We start at 50% and report the count above; the file is set
+  up so the threshold is a single-line change.
+
+- **Imputation.** Pool-mean imputation makes the v2sm pre-2000 cells
+  approximately constant at the pool mean — neutral by construction
+  but it's still synthetic data. If we wanted to be stricter we'd
+  drop any indicator whose post-2000 mean differs materially from its
+  full-pool mean (which would catch indicators where pre-2000 cells
+  have been imputed to a value far from where the indicator actually
+  sits when measured). Worth doing as a sensitivity if PC2's
+  interpretation hinges on a specific v2sm indicator that the filter
+  let through.
