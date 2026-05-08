@@ -22,3 +22,13 @@ body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
 }
+
+/* Force chart SVG text (axis ticks, tooltip wrappers) onto the GL stack
+   instead of inheriting the browser default (which on some platforms is
+   not Source Sans 3 even when the parent has it set). */
+.recharts-wrapper,
+.recharts-wrapper svg text,
+.recharts-tooltip-wrapper,
+.recharts-default-tooltip {
+  font-family: var(--font-sans);
+}

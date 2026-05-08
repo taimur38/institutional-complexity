@@ -1,0 +1,83 @@
+{
+  "start_year": 1900,
+  "groups": ["Democracy", "Rights & Liberties", "Governance"],
+  "indices": [
+    {
+      "tag": "v2x_polyarchy",
+      "label": "Electoral Democracy",
+      "group": "Democracy",
+      "question": "To what extent is the ideal of electoral democracy in its fullest sense achieved?",
+      "description": "The electoral principle of democracy seeks to embody the core value of making rulers responsive to citizens, achieved through electoral competition for the electorate's approval under circumstances when suffrage is extensive; political and civil society organizations can operate freely; elections are clean and not marred by fraud or systematic irregularities; and elections affect the composition of the chief executive of the country. In between elections, there is freedom of expression and an independent media capable of presenting alternative views on matters of political relevance. In the V-Dem conceptual scheme, electoral democracy is understood as an essential element of any other conception of representative democracy --- liberal, participatory, deliberative, egalitarian, or some other."
+    },
+    {
+      "tag": "v2x_libdem",
+      "label": "Liberal Democracy",
+      "group": "Democracy",
+      "question": "To what extent is the ideal of liberal democracy achieved?",
+      "description": "The liberal principle of democracy emphasizes the importance of protecting individual and minority rights against the tyranny of the state and the tyranny of the majority. The liberal model takes a \"negative\" view of political power insofar as it judges the quality of democracy by the limits placed on government. This is achieved by constitutionally protected civil liberties, strong rule of law, an independent judiciary, and effective checks and balances that, together, limit the exercise of executive power. To make this a measure of liberal democracy, the index also takes the level of electoral democracy into account."
+    },
+    {
+      "tag": "v2x_partipdem",
+      "label": "Participatory Democracy",
+      "group": "Democracy",
+      "question": "To what extent is the ideal of participatory democracy achieved?",
+      "description": "The participatory principle of democracy emphasizes active participation by citizens in all political processes, electoral and non-electoral. It is motivated by uneasiness about a bedrock practice of electoral democracy: delegating authority to representatives. Thus, direct rule by citizens is preferred, wherever practicable. This model of democracy thus takes suffrage for granted, emphasizing engagement in civil society organizations, direct democracy, and subnational elected bodies. To make it a measure of participatory democracy, the index also takes the level of electoral democracy into account."
+    },
+    {
+      "tag": "v2x_delibdem",
+      "label": "Deliberative Democracy",
+      "group": "Democracy",
+      "question": "To what extent is the ideal of deliberative democracy achieved?",
+      "description": "The deliberative principle of democracy focuses on the process by which decisions are reached in a polity. A deliberative process is one in which public reasoning focused on the common good motivates political decisions—as contrasted with emotional appeals, solidary attachments, parochial interests, or coercion. According to this principle, democracy requires more than an aggregation of existing preferences. There should also be respectful dialogue at all levels—from preference formation to final decision—among informed and competent participants who are open to persuasion. To make it a measure of not only the deliberative principle but also of democracy, the index also takes the level of electoral democracy into account."
+    },
+    {
+      "tag": "v2x_egaldem",
+      "label": "Egalitarian Democracy",
+      "group": "Democracy",
+      "question": "To what extent is the ideal of egalitarian democracy achieved?",
+      "description": "The egalitarian principle of democracy holds that material and immaterial inequalities inhibit the exercise of formal rights and liberties, and diminish the ability of citizens from all social groups to participate. Egalitarian democracy is achieved when 1 rights and freedoms of individuals are protected equally across all social groups; and 2 resources are distributed equally across all social groups; 3 groups and individuals enjoy equal access to power. To make it a measure of egalitarian democracy, the index also takes the level of electoral democracy into account."
+    },
+    {
+      "tag": "v2x_freexp_altinf",
+      "label": "Press & Expression",
+      "group": "Rights & Liberties",
+      "question": "To what extent does government respect press and media freedom, the freedom of ordinary people to discuss political matters at home and in the public sphere, as well as the freedom of academic and cultural expression?",
+      "description": "This index includes all variables in the two indices v2x_freexp and v2xme_altinf."
+    },
+    {
+      "tag": "v2x_clphy",
+      "label": "Physical Integrity",
+      "group": "Rights & Liberties",
+      "question": "To what extent is physical integrity respected?",
+      "description": "Physical integrity is understood as freedom from political killings and torture by the government. Among the set of civil liberties, these liberal rights are the most relevant for political competition and accountability. The index is based on indicators that reflect violence committed by government agents and that are not directly referring to elections."
+    },
+    {
+      "tag": "v2xcs_ccsi",
+      "label": "Civil Society",
+      "group": "Rights & Liberties",
+      "question": "How robust is civil society?",
+      "description": "The sphere of civil society lies in the public space between the private sphere and the state. Here, citizens organize in groups to pursue their collective interests and ideals. We call these groups civil society organizations CSOs. CSOs include, but are by no means limited to, interest groups, labor unions, spiritual organizations if they are engaged in civic or political activities, social movements, professional associations, charities, and other non-governmental organizations. The core civil society index CCSI is designed to provide a measure of a robust civil society, understood as one that enjoys autonomy from the state and in which citizens freely and actively pursue their political and civic goals, however conceived."
+    },
+    {
+      "tag": "v2x_rule",
+      "label": "Rule of Law",
+      "group": "Governance",
+      "question": "To what extent are laws transparently, independently, predictably, impartially, and equally enforced, and to what extent do the actions of government officials comply with the law?",
+      "description": [null]
+    },
+    {
+      "tag": "v2x_jucon",
+      "label": "Judicial Constraints",
+      "group": "Governance",
+      "question": "To what extent does the executive respect the constitution and comply with court rulings, and to what extent is the judiciary able to act in an independent fashion?",
+      "description": [null]
+    },
+    {
+      "tag": "v2x_neopat",
+      "label": "Neopatrimonialism",
+      "group": "Governance",
+      "question": "To what extent is rule based on personal authority?",
+      "description": "Neopatrimonial rule reflects the idea that personalistic forms of authority pervade formal regime institutions (Clapham, 1985). According to Bratton and Van de Walle (1997) a neopatrimonialism regime is one that combines clientelistic political relationships, strong and unconstrained presidents and the use of public resources for political legitimation. The index is constructed using Bayesian Factor Analysis of 16 indicators representing these three concepts. The sixteen indicators are those included in the three sub-indices: Clientelism, Presidentialism and Regime Corruption. The point estimates for this index have been reversed such that the directionality is opposite to the input variables. That is, lower scores indicate a normatively better situation (e.g. more democratic) and higher scores a normatively worse situation (e.g. less democratic). Note that this directionality is opposite of that of other V-Dem indices, which generally run from normatively worse to better."
+    }
+  ]
+}

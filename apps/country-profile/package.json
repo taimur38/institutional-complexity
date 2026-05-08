@@ -9,8 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "hyparquet": "^1.25.6",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^7.15.0",
+    "recharts": "^3.8.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.0.0",
