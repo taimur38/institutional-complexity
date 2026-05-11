@@ -1,4 +1,5 @@
 *.html
+!apps/**/index.html
 *_files/
 *_cache/
 .Rhistory
