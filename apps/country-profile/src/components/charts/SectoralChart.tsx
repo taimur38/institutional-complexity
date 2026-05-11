@@ -1,5 +1,7 @@
+import { useMemo } from "react";
 import {
   CartesianGrid,
+  Label,
   Legend,
   Line,
   LineChart,
@@ -15,7 +17,9 @@ import { useChartZoom } from "../../lib/useChartZoom";
 import { GL, GL_SECTORS } from "../../lib/glTokens";
 import { ZoomResetButton } from "./ZoomResetButton";
 
-const SECTORS: { key: keyof Omit<SectoralPoint, "year">; label: string; color: string }[] = [
+type SectorKey = keyof Omit<SectoralPoint, "year">;
+
+const SECTORS: { key: SectorKey; label: string; color: string }[] = [
   { key: "agr", label: "Agriculture", color: GL_SECTORS.agriculture },
   { key: "ind", label: "Industry", color: GL_SECTORS.industry },
   { key: "srv", label: "Services", color: GL_SECTORS.services },
@@ -31,6 +35,51 @@ const fmtBig = (v: number) => {
   return v.toFixed(0);
 };
 
+const fmtPct = (v: number | null) =>
+  v === null ? "—" : `${v >= 0 ? "+" : ""}${(v * 100).toFixed(1)}%`;
+
+// Compound annual growth rate of a level series between two endpoints.
+// Returns null if either endpoint is missing/invalid (sectoral series start
+// in 1991 for many countries — periods that begin earlier won't have a left
+// endpoint, and CAGR is undefined for non-positive levels).
+function cagr(start: number | null | undefined, end: number | null | undefined, years: number) {
+  if (
+    start == null ||
+    end == null ||
+    !Number.isFinite(start) ||
+    !Number.isFinite(end) ||
+    start <= 0 ||
+    end <= 0 ||
+    years <= 0
+  ) {
+    return null;
+  }
+  return Math.pow(end / start, 1 / years) - 1;
+}
+
+// For each break period, the per-sector CAGR. Returns one entry per period
+// with .mid (label x-position) plus a CAGR per sector (or null).
+function buildPeriodGrowth(
+  data: SectoralPoint[],
+  periods: { start: number; end: number }[],
+) {
+  if (periods.length === 0) return [];
+  const byYear = new Map<number, SectoralPoint>();
+  for (const d of data) byYear.set(d.year, d);
+  return periods.map((p) => {
+    const startPt = byYear.get(p.start);
+    const endPt = byYear.get(p.end);
+    const years = p.end - p.start;
+    const out: { mid: number } & Record<SectorKey, number | null> = {
+      mid: (p.start + p.end) / 2,
+      agr: cagr(startPt?.agr, endPt?.agr, years),
+      ind: cagr(startPt?.ind, endPt?.ind, years),
+      srv: cagr(startPt?.srv, endPt?.srv, years),
+    };
+    return out;
+  });
+}
+
 type Props = {
   record: GrowthRecord;
   mode: "va" | "productivity";
@@ -41,6 +90,10 @@ export function SectoralChart({ record, mode }: Props) {
     mode === "va" ? record.sectoral_va : record.sectoral_productivity;
   const breaks = record.breaks;
   const zoom = useChartZoom();
+  const periodGrowth = useMemo(
+    () => buildPeriodGrowth(data, breaks?.periods ?? []),
+    [data, breaks],
+  );
 
   if (data.length === 0) {
     return (
@@ -52,12 +105,12 @@ export function SectoralChart({ record, mode }: Props) {
   }
 
   return (
-    <div className="relative h-72 w-full">
+    <div className="relative h-80 w-full">
       <ZoomResetButton show={zoom.isZoomed} onReset={zoom.reset} />
       <ResponsiveContainer>
         <LineChart
           data={data}
-          margin={{ top: 12, right: 16, left: 4, bottom: 4 }}
+          margin={{ top: 50, right: 16, left: 4, bottom: 4 }}
           onMouseDown={zoom.onMouseDown}
           onMouseMove={zoom.onMouseMove}
           onMouseUp={zoom.onMouseUp}
@@ -88,8 +141,8 @@ export function SectoralChart({ record, mode }: Props) {
             contentStyle={{ fontSize: 12 }}
           />
           <Legend
-            verticalAlign="top"
-            height={28}
+            verticalAlign="bottom"
+            height={24}
             wrapperStyle={{ fontSize: 12 }}
           />
           {breaks?.years.map((y) => (
@@ -101,6 +154,28 @@ export function SectoralChart({ record, mode }: Props) {
               strokeWidth={1}
             />
           ))}
+          {periodGrowth.flatMap((p, i) =>
+            SECTORS.flatMap((s, idx) => {
+              const v = p[s.key];
+              if (v === null) return [];
+              return [
+                <ReferenceLine
+                  key={`pavg-${i}-${s.key}`}
+                  x={p.mid}
+                  stroke="transparent"
+                  ifOverflow="extendDomain"
+                >
+                  <Label
+                    value={fmtPct(v)}
+                    position="top"
+                    dy={idx * 13 - 38}
+                    fill={s.color}
+                    style={{ fontSize: 10, fontWeight: 600 }}
+                  />
+                </ReferenceLine>,
+              ];
+            }),
+          )}
           {SECTORS.map((s) => (
             <Line
               key={s.key}

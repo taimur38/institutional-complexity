@@ -94,3 +94,33 @@ export type VDemIndicatorRegistry = {
 
 // BdM winning-coalition (W) series — one ScalarPoint[] per ISO3.
 export type BdmIndex = Record<string, ScalarPoint[]>;
+
+// Pooled-panel PCA scores — one row per (ISO3, year), wide across the
+// first five components. Loaded from pc_scores.parquet.
+export type PCKey = "pc1" | "pc2" | "pc3" | "pc4" | "pc5";
+export type PCRow = {
+  iso3: string;
+  year: number;
+  pc1: number;
+  pc2: number;
+  pc3: number;
+  pc4: number;
+  pc5: number;
+};
+
+export type PCComponent = {
+  key: PCKey;
+  name: string;
+  var_explained: number;
+  short: string;
+  positive_pole: string;
+  negative_pole: string;
+};
+
+export type PCMeta = {
+  source: string;
+  panel_window: [number, number];
+  n_country_years: number;
+  n_features: number;
+  components: PCComponent[];
+};

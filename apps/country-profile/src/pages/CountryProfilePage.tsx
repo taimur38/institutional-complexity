@@ -3,10 +3,12 @@ import { useNavigate, useParams } from "react-router-dom";
 import type { Country, GrowthIndex, PeersIndex } from "../types";
 import { CountryPicker } from "../components/CountryPicker";
 import { PeerSection } from "../components/PeerSection";
+import { PeerAnomaliesSection } from "../components/PeerAnomaliesSection";
 import { GrowthBreaksSection } from "../components/GrowthBreaksSection";
 import { VDemSection } from "../components/VDemSection";
 import { VDemExplorer } from "../components/VDemExplorer";
 import { BdmSection } from "../components/BdmSection";
+import { PCTrajectoriesSection } from "../components/PCTrajectoriesSection";
 
 const DEFAULT_ISO = "PAK";
 const DEFAULT_N_PEERS = 5;
@@ -118,6 +120,12 @@ export function CountryProfilePage() {
         onChange={setPeerIsos}
       />
 
+      <PeerAnomaliesSection
+        focus={focus}
+        countries={countries}
+        peerIsos={peerIsos}
+      />
+
       <GrowthBreaksSection record={growth[focus.iso3] ?? null} />
 
       <VDemSection
@@ -133,6 +141,12 @@ export function CountryProfilePage() {
       />
 
       <BdmSection
+        focus={focus}
+        peers={peerList}
+        growthRecord={growth[focus.iso3] ?? null}
+      />
+
+      <PCTrajectoriesSection
         focus={focus}
         peers={peerList}
         growthRecord={growth[focus.iso3] ?? null}

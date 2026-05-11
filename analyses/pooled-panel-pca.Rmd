@@ -393,6 +393,53 @@ for (i in seq_len(nrow(pc2_neg15))) {
 }
 ```
 
+## PC3 in detail: top and bottom 12 loadings with codebook definitions
+
+PC3 is the third-most-important axis after democracy (PC1) and stateness
+(PC2). Two facts shape how we present it here:
+
+- **Asymmetry.** Unlike PC2, PC3's loading magnitudes are not symmetric
+  across the two poles. The largest positive loading is +0.172, the
+  largest negative is --0.154; the asymmetry ratio (largest pos / largest
+  neg) widens from 1.12 at the top of the list to 1.29 by rank 15. The
+  top 15 by absolute magnitude is 21 positive and 9 negative loadings ---
+  the positive pole is more concentrated, the negative pole is more
+  diffuse.
+- **Cutoff.** Through rank 12 both poles still have |loading| >= 0.10
+  (largest 0.172, smallest pos 0.123, smallest neg --0.102). Past rank 12
+  on the negative side, loadings fall below 0.10 and the marginal
+  interpretive content drops. We therefore use top 12 each side here
+  (rather than top 15 as for PC2), trading a bit of coverage for a
+  higher-signal table. Top 12 positive captures ~24% of total PC3
+  squared mass; top 12 negative captures ~19%.
+
+As with PC2, several top contributors have inverted scales, so the
+loading sign and the meaning of "high indicator score" don't line up
+the way the indicator names suggest. The full response options below
+make directionality unambiguous.
+
+### PC3 --- top 12 positive loadings
+
+These pull a country-year toward the positive pole of PC3.
+
+```{r pc3-pos12-detail, results='asis'}
+pc3_pos12 <- top_loadings("PC3", 12, "pos")
+for (i in seq_len(nrow(pc3_pos12))) {
+  format_indicator_block(pc3_pos12$code[i], pc3_pos12$loading[i], vdem_codebook)
+}
+```
+
+### PC3 --- top 12 negative loadings
+
+These pull a country-year toward the negative pole of PC3.
+
+```{r pc3-neg12-detail, results='asis'}
+pc3_neg12 <- top_loadings("PC3", 12, "neg")
+for (i in seq_len(nrow(pc3_neg12))) {
+  format_indicator_block(pc3_neg12$code[i], pc3_neg12$loading[i], vdem_codebook)
+}
+```
+
 ## Loading mass by V-Dem category, per PC
 
 The same redundancy worry as before: a PC that draws disproportionately from

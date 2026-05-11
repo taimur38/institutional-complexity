@@ -7,3 +7,8 @@
 scratch/
 .claude/
 data/
+
+# Frontend build artifacts
+apps/**/node_modules/
+apps/**/dist/
+apps/**/tsconfig.tsbuildinfo
