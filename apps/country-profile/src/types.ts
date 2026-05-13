@@ -95,6 +95,25 @@ export type VDemIndicatorRegistry = {
 // BdM winning-coalition (W) series — one ScalarPoint[] per ISO3.
 export type BdmIndex = Record<string, ScalarPoint[]>;
 
+// State capacity (Hanson & Sigman / QoG `lld`). One series per country with
+// posterior SD packed alongside so the UI can render a ±1 SD band.
+export type StateCapacityPoint = { year: number; value: number; sd: number };
+export type StateCapacityRecord = {
+  iso3: string;
+  capacity: StateCapacityPoint[];
+};
+export type StateCapacityMeta = {
+  start_year: number;
+  end_year: number;
+  source: string;
+  citation: string;
+  index: {
+    tag: string;
+    label: string;
+    description: string;
+  };
+};
+
 // Pooled-panel PCA scores — one row per (ISO3, year), wide across the
 // first five components. Loaded from pc_scores.parquet.
 export type PCKey = "pc1" | "pc2" | "pc3" | "pc4" | "pc5";

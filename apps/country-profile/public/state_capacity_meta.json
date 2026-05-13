@@ -1,0 +1,11 @@
+{
+  "start_year": 1960,
+  "end_year": 2015,
+  "source": "Hanson & Sigman (2021), via QoG dataset 'lld'",
+  "citation": "Hanson, Jonathan K. and Rachel Sigman. 2021. 'Leviathan's Latent Dimensions: Measuring State Capacity for Comparative Political Research.' Journal of Politics 83(4): 1495–1510.",
+  "index": {
+    "tag": "lld_capacity",
+    "label": "State capacity",
+    "description": "Bayesian latent index of state capacity combining extractive (taxation), coercive (military / police), and administrative (bureaucratic quality) dimensions. Unitless; higher = more capable. Typical range ≈ [-2.5, 3.0]. The shaded band shows ±1 posterior standard deviation."
+  }
+}

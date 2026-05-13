@@ -8,6 +8,7 @@ import { GrowthBreaksSection } from "../components/GrowthBreaksSection";
 import { VDemSection } from "../components/VDemSection";
 import { VDemExplorer } from "../components/VDemExplorer";
 import { BdmSection } from "../components/BdmSection";
+import { StateCapacitySection } from "../components/StateCapacitySection";
 import { PCTrajectoriesSection } from "../components/PCTrajectoriesSection";
 
 const DEFAULT_ISO = "PAK";
@@ -141,6 +142,12 @@ export function CountryProfilePage() {
       />
 
       <BdmSection
+        focus={focus}
+        peers={peerList}
+        growthRecord={growth[focus.iso3] ?? null}
+      />
+
+      <StateCapacitySection
         focus={focus}
         peers={peerList}
         growthRecord={growth[focus.iso3] ?? null}
