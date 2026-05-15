@@ -1,0 +1,567 @@
+import { useMemo, useState } from "react";
+import {
+  CartesianGrid,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Scatter,
+  ScatterChart,
+  Tooltip,
+  XAxis,
+  YAxis,
+  ZAxis,
+} from "recharts";
+import type {
+  Country,
+  PolSettMeta,
+  PolSettTypologyRow,
+  PolSettTypologySpec,
+} from "../types";
+import { GL } from "../lib/glTokens";
+import { usePolSettTypology } from "../lib/usePolSett";
+
+type Props = {
+  focus: Country;
+  peers: { iso3: string; name: string }[];
+};
+
+// Quadrant labels rendered at the four corners. Keys are
+// (broad|narrow / concentrated|dispersed) for the SK typology and
+// (high|low horizontal / high|low vertical) for the Khan typology.
+const QUADRANTS = {
+  topLeft: "Vulnerable-Authoritarian",
+  topRight: "Strong-Dominant",
+  bottomLeft: "Competitive-Clientelist",
+  bottomRight: "Weak-Dominant",
+} as const;
+
+type ChartConfig = {
+  spec: PolSettTypologySpec;
+  xKey: "sfs" | "horz";
+  yKey: "pc" | "vert";
+  labelKey: "sk_label" | "khan_label";
+  xDomain: [number, number];
+  yDomain: [number, number];
+  xTicks: number[];
+  yTicks: number[];
+  xFormat: (v: number) => string;
+  yFormat: (v: number) => string;
+  xAxisCaption: string;
+  yAxisCaption: string;
+};
+
+export function PolSettTypologySection({ focus, peers }: Props) {
+  const state = usePolSettTypology();
+  const [periodKey, setPeriodKey] = useState<string | null>(null);
+  const [highlightPeers, setHighlightPeers] = useState(false);
+
+  // Build the unique-period list for the focus country. Each PolSett row is
+  // a country-year inside a political period, with values held constant
+  // within the period — so de-dupe on (period_start, period_end).
+  const focusPeriods = useMemo(() => {
+    if (state.status !== "ready") return [];
+    const rows = state.bundle.byIso.get(focus.iso3) ?? [];
+    const seen = new Map<string, PolSettTypologyRow>();
+    for (const r of rows) {
+      const key = `${r.period_start}-${r.period_end}`;
+      if (!seen.has(key)) seen.set(key, r);
+    }
+    return [...seen.values()].sort(
+      (a, b) => a.period_start - b.period_start,
+    );
+  }, [state, focus.iso3]);
+
+  // Default to the most recent settlement.
+  const effectivePeriodKey =
+    periodKey ?? (focusPeriods.length > 0
+      ? `${focusPeriods[focusPeriods.length - 1].period_start}-${focusPeriods[focusPeriods.length - 1].period_end}`
+      : null);
+
+  // The selected period defines a year — any year inside it works since
+  // values are constant within a period. We pick period_start.
+  const selectedRow = useMemo(() => {
+    if (!effectivePeriodKey) return null;
+    return (
+      focusPeriods.find(
+        (p) => `${p.period_start}-${p.period_end}` === effectivePeriodKey,
+      ) ?? null
+    );
+  }, [focusPeriods, effectivePeriodKey]);
+
+  const selectedYear = selectedRow?.period_start ?? null;
+
+  // Slice: all PolSett countries' rows for the selected year.
+  const slice = useMemo(() => {
+    if (state.status !== "ready" || selectedYear == null) return [];
+    return state.bundle.byYear.get(selectedYear) ?? [];
+  }, [state, selectedYear]);
+
+  const countryNameMap = useMemo(() => {
+    if (state.status !== "ready") return new Map<string, string>();
+    return new Map(state.bundle.meta.countries.map((c) => [c.iso3, c.name]));
+  }, [state]);
+
+  if (state.status === "loading" || state.status === "idle") {
+    return (
+      <section className="mt-12">
+        <Header />
+        <p className="text-xs text-gl-muted">Loading PolSett data…</p>
+      </section>
+    );
+  }
+  if (state.status === "error") {
+    return (
+      <section className="mt-12">
+        <Header />
+        <p className="text-xs text-red-600">
+          Failed to load: {state.error.message}
+        </p>
+      </section>
+    );
+  }
+
+  const meta: PolSettMeta = state.bundle.meta;
+
+  // Common chart configs.
+  const skCfg: ChartConfig = {
+    spec: meta.typology_sk,
+    xKey: "sfs",
+    yKey: "pc",
+    labelKey: "sk_label",
+    xDomain: [0, 90],
+    yDomain: [0, 1],
+    xTicks: [0, 20, 40, 60, 80],
+    yTicks: [0, 0.25, 0.5, 0.75, 1],
+    xFormat: (v) => `${v}%`,
+    yFormat: (v) => v.toFixed(2),
+    xAxisCaption: "Social foundation size — narrow ← → broad",
+    yAxisCaption: "Power concentration — dispersed ↓ ↑ concentrated",
+  };
+
+  const khanCfg: ChartConfig = {
+    spec: meta.typology_khan,
+    xKey: "horz",
+    yKey: "vert",
+    labelKey: "khan_label",
+    xDomain: [1, 5],
+    yDomain: [0, 1],
+    xTicks: [1, 2, 3, 4, 5],
+    yTicks: [0, 0.25, 0.5, 0.75, 1],
+    xFormat: (v) => v.toFixed(0),
+    yFormat: (v) => v.toFixed(2),
+    xAxisCaption: "Horizontal power — OB-dominant ← → coalition-dominant",
+    yAxisCaption: "Vertical power — dispersed ↓ ↑ leader-dominated",
+  };
+
+  // Status sub-line printed once at the top.
+  const inPolSett = meta.countries.some((c) => c.iso3 === focus.iso3);
+
+  return (
+    <section className="mt-12 space-y-4">
+      <Header />
+
+      <p className="text-sm text-gl-muted">
+        Two complementary typologies of political settlements. Both are
+        period-coded — values stay constant inside a political period
+        (bounded by leadership change) and step at period breaks. Sample: 42
+        Global-South countries, {meta.year_range[0]}–{meta.year_range[1]}.
+      </p>
+
+      {/* Settlement selector */}
+      <div className="flex flex-wrap items-center gap-3 rounded border border-gl-border bg-white px-3 py-2">
+        <label className="flex items-center gap-2 text-xs">
+          <span className="font-medium">Political settlement:</span>
+          <select
+            value={effectivePeriodKey ?? ""}
+            onChange={(e) => setPeriodKey(e.target.value || null)}
+            disabled={focusPeriods.length === 0}
+            className="min-w-[320px] rounded border border-gl-border bg-white px-2 py-1 text-xs"
+          >
+            {focusPeriods.length === 0 && (
+              <option value="">
+                {focus.name} is not in the PolSett sample
+              </option>
+            )}
+            {focusPeriods.map((p) => {
+              const key = `${p.period_start}-${p.period_end}`;
+              const leader = p.leader ?? "—";
+              return (
+                <option key={key} value={key}>
+                  {p.period_start}–{p.period_end} · {leader}
+                </option>
+              );
+            })}
+          </select>
+        </label>
+        <label className="flex cursor-pointer items-center gap-2 text-xs">
+          <input
+            type="checkbox"
+            checked={highlightPeers}
+            onChange={(e) => setHighlightPeers(e.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          <span>Highlight peers ({peers.length})</span>
+        </label>
+        {!inPolSett && (
+          <span className="text-xs text-red-600">
+            {focus.name} is not in the 42-country PolSett sample.
+          </span>
+        )}
+      </div>
+
+      {/* SK typology (book) */}
+      <div className="space-y-2">
+        <div>
+          <h3 className="text-base font-semibold">
+            Schulz &amp; Kelsall typology: social foundation × power concentration
+          </h3>
+          <p className="text-xs text-gl-muted">
+            {meta.typology_sk.x_label.toLowerCase()} ({meta.typology_sk.x_description.toLowerCase().split(".")[0]})
+            {" "}vs{" "}{meta.typology_sk.y_label.toLowerCase()}{" "}
+            ({meta.typology_sk.y_description.toLowerCase().split(".")[0]}).
+          </p>
+        </div>
+        <TypologyChart
+          cfg={skCfg}
+          slice={slice}
+          focus={focus}
+          peers={peers}
+          selectedRow={selectedRow}
+          highlightPeers={highlightPeers}
+          countryNameMap={countryNameMap}
+        />
+      </div>
+
+      {/* Khan typology */}
+      <div className="space-y-2 pt-4">
+        <div>
+          <h3 className="text-base font-semibold">
+            Khan typology: horizontal × vertical power
+          </h3>
+          <p className="text-sm text-gl-muted">
+            Mushtaq Khan&rsquo;s classical typology distinguishes settlements
+            by two dimensions of <em>holding power</em>. <b>Horizontal power</b>{" "}
+            is how strong the governing coalition is vis-à-vis the excluded
+            opposition (the LB + CLB versus the OB). <b>Vertical power</b> is
+            how concentrated power is within the coalition itself — i.e.,
+            whether the leader&rsquo;s bloc dominates its allies (LB versus
+            CLB). The four resulting types — Strong-Dominant, Vulnerable-Authoritarian,
+            Weak-Dominant, Competitive-Clientelist — anchor much of the
+            political-settlements literature.{" "}
+            <em>
+              Labels here come from <code>x_khansettlementype</code> in the
+              dataset (codebook 4.1.11).
+            </em>
+          </p>
+        </div>
+        <TypologyChart
+          cfg={khanCfg}
+          slice={slice}
+          focus={focus}
+          peers={peers}
+          selectedRow={selectedRow}
+          highlightPeers={highlightPeers}
+          countryNameMap={countryNameMap}
+        />
+      </div>
+    </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+function Header() {
+  return (
+    <div>
+      <h2 className="text-xl font-semibold">
+        Political-settlements typology (PolSett)
+      </h2>
+      <p className="mt-0.5 text-xs text-gl-muted">
+        Schulz &amp; Kelsall 2020 · ESID Working Paper 165
+      </p>
+    </div>
+  );
+}
+
+type ChartProps = {
+  cfg: ChartConfig;
+  slice: PolSettTypologyRow[];
+  focus: Country;
+  peers: { iso3: string; name: string }[];
+  selectedRow: PolSettTypologyRow | null;
+  highlightPeers: boolean;
+  countryNameMap: Map<string, string>;
+};
+
+type Point = PolSettTypologyRow & { name?: string };
+
+function TypologyChart({
+  cfg,
+  slice,
+  focus,
+  peers,
+  selectedRow,
+  highlightPeers,
+  countryNameMap,
+}: ChartProps) {
+  const peerIsoSet = useMemo(
+    () => new Set(peers.map((p) => p.iso3)),
+    [peers],
+  );
+
+  const { focusPts, peerPts, otherPts } = useMemo(() => {
+    const focusPts: Point[] = [];
+    const peerPts: Point[] = [];
+    const otherPts: Point[] = [];
+    for (const row of slice) {
+      const name = countryNameMap.get(row.iso3) ?? row.iso3;
+      const p: Point = { ...row, name };
+      if (row.iso3 === focus.iso3) focusPts.push(p);
+      else if (peerIsoSet.has(row.iso3)) peerPts.push(p);
+      else otherPts.push(p);
+    }
+    return { focusPts, peerPts, otherPts };
+  }, [slice, focus.iso3, peerIsoSet, countryNameMap]);
+
+  const focusOnAxes = focusPts[0];
+  const xCut = cfg.spec.x_cut;
+  const yCut = cfg.spec.y_cut;
+  const [xMin, xMax] = cfg.xDomain;
+  const [yMin, yMax] = cfg.yDomain;
+
+  return (
+    <div className="rounded border border-gl-border bg-white p-3">
+      <div className="mb-2 px-1 text-xs text-gl-muted">
+        {focusOnAxes ? (
+          <>
+            <span className="font-medium text-gl-text">{focus.name}:</span>{" "}
+            {focusOnAxes[cfg.labelKey] ?? "—"} · {cfg.spec.x_label.toLowerCase()}{" "}
+            = {cfg.xFormat(focusOnAxes[cfg.xKey] as number)} ·{" "}
+            {cfg.spec.y_label.toLowerCase()} ={" "}
+            {cfg.yFormat(focusOnAxes[cfg.yKey] as number)}
+            {selectedRow?.leader && (
+              <>
+                {" "}· leader{" "}
+                <span className="italic">{selectedRow.leader}</span>
+              </>
+            )}
+          </>
+        ) : selectedRow ? (
+          <>
+            <span className="font-medium text-gl-text">{focus.name}:</span>{" "}
+            missing values for these axes in the selected settlement
+          </>
+        ) : (
+          <span className="text-gl-muted">
+            Select a political settlement above to position {focus.name}.
+          </span>
+        )}
+      </div>
+
+      <div className="relative h-[420px] w-full">
+        <ResponsiveContainer>
+          <ScatterChart margin={{ top: 20, right: 30, left: 10, bottom: 40 }}>
+            <CartesianGrid stroke={GL.border} strokeDasharray="3 3" />
+            <XAxis
+              type="number"
+              dataKey={cfg.xKey}
+              domain={cfg.xDomain}
+              tick={{ fontSize: 10, fill: GL.muted }}
+              tickLine={false}
+              ticks={cfg.xTicks}
+              tickFormatter={cfg.xFormat}
+              label={{
+                value: cfg.xAxisCaption,
+                position: "insideBottom",
+                offset: -20,
+                style: { fontSize: 11, fill: GL.muted },
+              }}
+            />
+            <YAxis
+              type="number"
+              dataKey={cfg.yKey}
+              domain={cfg.yDomain}
+              tick={{ fontSize: 10, fill: GL.muted }}
+              tickLine={false}
+              width={50}
+              ticks={cfg.yTicks}
+              tickFormatter={cfg.yFormat}
+              label={{
+                value: cfg.yAxisCaption,
+                angle: -90,
+                position: "insideLeft",
+                offset: 10,
+                style: {
+                  fontSize: 11,
+                  fill: GL.muted,
+                  textAnchor: "middle",
+                },
+              }}
+            />
+            <ZAxis range={[60, 60]} />
+
+            <ReferenceLine x={xCut} stroke={GL.muted} strokeDasharray="2 4" />
+            <ReferenceLine y={yCut} stroke={GL.muted} strokeDasharray="2 4" />
+
+            <ReferenceArea
+              x1={xMin} x2={xCut} y1={yCut} y2={yMax}
+              fill="transparent"
+              label={{
+                value: QUADRANTS.topLeft,
+                position: "insideTopLeft",
+                fontSize: 10,
+                fill: GL.muted,
+                offset: 8,
+              }}
+            />
+            <ReferenceArea
+              x1={xCut} x2={xMax} y1={yCut} y2={yMax}
+              fill="transparent"
+              label={{
+                value: QUADRANTS.topRight,
+                position: "insideTopRight",
+                fontSize: 10,
+                fill: GL.muted,
+                offset: 8,
+              }}
+            />
+            <ReferenceArea
+              x1={xMin} x2={xCut} y1={yMin} y2={yCut}
+              fill="transparent"
+              label={{
+                value: QUADRANTS.bottomLeft,
+                position: "insideBottomLeft",
+                fontSize: 10,
+                fill: GL.muted,
+                offset: 8,
+              }}
+            />
+            <ReferenceArea
+              x1={xCut} x2={xMax} y1={yMin} y2={yCut}
+              fill="transparent"
+              label={{
+                value: QUADRANTS.bottomRight,
+                position: "insideBottomRight",
+                fontSize: 10,
+                fill: GL.muted,
+                offset: 8,
+              }}
+            />
+
+            <Tooltip
+              cursor={{ strokeDasharray: "3 3" }}
+              content={<TypologyTooltip cfg={cfg} />}
+            />
+
+            <Scatter
+              name="Other countries"
+              data={otherPts}
+              fill={GL.muted}
+              fillOpacity={0.25}
+              stroke="none"
+            />
+            <Scatter
+              name="Peers"
+              data={peerPts}
+              fill={GL.highlight}
+              fillOpacity={highlightPeers ? 0.95 : 0.3}
+              stroke={highlightPeers ? GL.highlight : "none"}
+              strokeWidth={highlightPeers ? 1.5 : 0}
+            />
+            <Scatter
+              name={focus.name}
+              data={focusPts}
+              fill={GL.blue}
+              fillOpacity={1}
+              stroke="white"
+              strokeWidth={2}
+              shape={(props: {
+                cx?: number;
+                cy?: number;
+                payload?: Point;
+              }) => {
+                const { cx, cy, payload } = props;
+                if (cx == null || cy == null) return <g />;
+                return (
+                  <g>
+                    <circle
+                      cx={cx}
+                      cy={cy}
+                      r={8}
+                      fill={GL.blue}
+                      stroke="white"
+                      strokeWidth={2}
+                    />
+                    <text
+                      x={cx + 12}
+                      y={cy + 4}
+                      fontSize={11}
+                      fontWeight={600}
+                      fill={GL.text}
+                    >
+                      {payload?.name ?? focus.name}
+                    </text>
+                  </g>
+                );
+              }}
+            />
+          </ScatterChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <span className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full"
+            style={{ background: GL.blue }}
+          />
+          <span className="font-medium">{focus.name}</span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full"
+            style={{
+              background: GL.highlight,
+              opacity: highlightPeers ? 0.95 : 0.3,
+            }}
+          />
+          <span className="text-gl-muted">peers</span>
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-2.5 w-2.5 rounded-full opacity-25"
+            style={{ background: GL.muted }}
+          />
+          <span className="text-gl-muted">other Global-South countries</span>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function TypologyTooltip({
+  active,
+  payload,
+  cfg,
+}: {
+  active?: boolean;
+  payload?: Array<{ payload: Point }>;
+  cfg: ChartConfig;
+}) {
+  if (!active || !payload?.length) return null;
+  const p = payload[0].payload;
+  return (
+    <div className="rounded border border-gl-border bg-white px-2.5 py-1.5 text-xs shadow-sm">
+      <div className="font-medium">{p.name}</div>
+      <div className="text-gl-muted">
+        {cfg.spec.x_label} {cfg.xFormat(p[cfg.xKey] as number)} ·{" "}
+        {cfg.spec.y_label} {cfg.yFormat(p[cfg.yKey] as number)}
+        {p[cfg.labelKey] ? ` · ${p[cfg.labelKey]}` : ""}
+      </div>
+      {p.leader && (
+        <div className="text-gl-muted italic">
+          {p.leader} ({p.period_start}–{p.period_end})
+        </div>
+      )}
+    </div>
+  );
+}

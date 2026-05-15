@@ -182,6 +182,69 @@ export type RelatedIndicatorsMeta = {
 
 export type RelatedIndicatorsRecord = IndicatorSeriesRecord;
 
+// PolSett (Political Settlements, Schulz & Kelsall 2020) — 42 Global-South
+// countries × political periods. Typology axes: social foundation size
+// (x; 0-100%) and power concentration (y; 0-1). `khan` is the 4-category
+// Khan typology computed from the two axis dummies.
+export type PolSettTypologyRow = {
+  iso3: string;
+  year: number;
+  // Schulz-Kelsall ("book") axes
+  sfs: number;             // Social foundation size, 0-100
+  pc: number;              // Power concentration (mix), 0-1
+  // Khan axes
+  horz: number;            // Horizontal power, 1-5
+  vert: number;            // Vertical power index, 0-1
+  // Labels — each anchored to its own axes (sk_label from (sfs,pc) cuts;
+  // khan_label straight from the dataset's `x_khansettlementype` which is
+  // horizontal × vertical dummies).
+  sk_code: "BC" | "NC" | "ND" | "BD";
+  sk_label: string;
+  khan_raw: 1 | 2 | 3 | 4 | null;
+  khan_label: string | null;
+  leader: string | null;
+  period_start: number;
+  period_end: number;
+};
+
+export type PolSettTypologySpec = {
+  x_var: string;
+  y_var: string;
+  x_label: string;
+  y_label: string;
+  x_cut: number;
+  y_cut: number;
+  x_description: string;
+  y_description: string;
+};
+
+export type PolSettMeta = {
+  source: string;
+  citation: string;
+  year_range: [number, number];
+  countries: { iso3: string; name: string }[];
+  typology_sk: PolSettTypologySpec;
+  typology_khan: PolSettTypologySpec;
+};
+
+export type PolSettIndicator = {
+  tag: string;
+  name: string;
+  section: string;
+  section_label: string;
+  question: string | null;
+  clarification: string | null;
+  responses: string | null;
+  construction: string | null;
+  scale: string | null;
+  notes: string | null;
+};
+
+export type PolSettIndicatorRegistry = {
+  sections: { section: string; section_label: string }[];
+  indicators: PolSettIndicator[];
+};
+
 // Pooled-panel PCA scores — one row per (ISO3, year), wide across the
 // first five components. Loaded from pc_scores.parquet.
 export type PCKey = "pc1" | "pc2" | "pc3" | "pc4" | "pc5";

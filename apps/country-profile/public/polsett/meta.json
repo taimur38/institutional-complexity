@@ -1,0 +1,195 @@
+{
+  "source": "Schulz & Kelsall (2020), ESID — Political Settlements (PolSett) Dataset",
+  "citation": "Schulz, Nicolai and Tim Kelsall. 2021. 'The political settlements dataset: An introduction with illustrative applications.' ESID Working Paper No. 165. Manchester.",
+  "year_range": [1945, 2019],
+  "countries": [
+    {
+      "iso3": "AGO",
+      "name": "Angola"
+    },
+    {
+      "iso3": "BGD",
+      "name": "Bangladesh"
+    },
+    {
+      "iso3": "CHN",
+      "name": "China"
+    },
+    {
+      "iso3": "CIV",
+      "name": "Côte d'Ivoire"
+    },
+    {
+      "iso3": "CMR",
+      "name": "Cameroon"
+    },
+    {
+      "iso3": "COD",
+      "name": "D.R. of the Congo"
+    },
+    {
+      "iso3": "DOM",
+      "name": "Dominican Republic"
+    },
+    {
+      "iso3": "ECU",
+      "name": "Ecuador"
+    },
+    {
+      "iso3": "EGY",
+      "name": "Egypt"
+    },
+    {
+      "iso3": "ETH",
+      "name": "Ethiopia"
+    },
+    {
+      "iso3": "GHA",
+      "name": "Ghana"
+    },
+    {
+      "iso3": "GIN",
+      "name": "Guinea"
+    },
+    {
+      "iso3": "GTM",
+      "name": "Guatemala"
+    },
+    {
+      "iso3": "HND",
+      "name": "Honduras"
+    },
+    {
+      "iso3": "HTI",
+      "name": "Haiti"
+    },
+    {
+      "iso3": "IDN",
+      "name": "Indonesia"
+    },
+    {
+      "iso3": "IND",
+      "name": "India"
+    },
+    {
+      "iso3": "KEN",
+      "name": "Kenya"
+    },
+    {
+      "iso3": "KHM",
+      "name": "Cambodia"
+    },
+    {
+      "iso3": "KOR",
+      "name": "Republic of Korea"
+    },
+    {
+      "iso3": "LKA",
+      "name": "Sri Lanka"
+    },
+    {
+      "iso3": "MAR",
+      "name": "Morocco"
+    },
+    {
+      "iso3": "MDG",
+      "name": "Madagascar"
+    },
+    {
+      "iso3": "MMR",
+      "name": "Myanmar"
+    },
+    {
+      "iso3": "MOZ",
+      "name": "Mozambique"
+    },
+    {
+      "iso3": "MYS",
+      "name": "Malaysia"
+    },
+    {
+      "iso3": "NGA",
+      "name": "Nigeria"
+    },
+    {
+      "iso3": "PAK",
+      "name": "Pakistan"
+    },
+    {
+      "iso3": "PHL",
+      "name": "Philippines"
+    },
+    {
+      "iso3": "RWA",
+      "name": "Rwanda"
+    },
+    {
+      "iso3": "SDN",
+      "name": "Sudan"
+    },
+    {
+      "iso3": "SEN",
+      "name": "Senegal"
+    },
+    {
+      "iso3": "SOM",
+      "name": "Somalia"
+    },
+    {
+      "iso3": "SYR",
+      "name": "Syrian Arab Republic"
+    },
+    {
+      "iso3": "THA",
+      "name": "Thailand"
+    },
+    {
+      "iso3": "TUN",
+      "name": "Tunisia"
+    },
+    {
+      "iso3": "TZA",
+      "name": "Tanzania"
+    },
+    {
+      "iso3": "UGA",
+      "name": "Uganda"
+    },
+    {
+      "iso3": "VNM",
+      "name": "Vietnam"
+    },
+    {
+      "iso3": "YEM",
+      "name": "Yemen"
+    },
+    {
+      "iso3": "ZAF",
+      "name": "South Africa"
+    },
+    {
+      "iso3": "ZMB",
+      "name": "Zambia"
+    }
+  ],
+  "typology_sk": {
+    "x_var": "x_socialfoundationsize",
+    "y_var": "x_powerconcentration_mix",
+    "x_label": "Social foundation size",
+    "y_label": "Power concentration",
+    "x_cut": 41,
+    "y_cut": 0.56,
+    "x_description": "Share of the population that is both potentially powerful/disruptive AND co-opted under the leadership (0–100%). Narrow ↔ broad.",
+    "y_description": "Composite of horizontal power (governing coalition vs opposition) and vertical power (leader within coalition), min-max normalized (0–1). Dispersed ↔ concentrated."
+  },
+  "typology_khan": {
+    "x_var": "x_horizontalpower",
+    "y_var": "x_verticalpower",
+    "x_label": "Horizontal power",
+    "y_label": "Vertical power",
+    "x_cut": 3.28,
+    "y_cut": 0.44,
+    "x_description": "How concentrated power is in the governing coalition (LB + CLB) vis-à-vis the opposition. 1 = OB dominates, 5 = governing coalition dominates. Mean ≈ 3.28.",
+    "y_description": "How concentrated power is in the leader's bloc within the governing coalition (LB vs CLB). PCA-weighted index of LB-vs-CLB power ratio, likelihood of CLB defection, LB hierarchy and LB cohesiveness; min-max normalised. Mean ≈ 0.44."
+  }
+}

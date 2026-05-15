@@ -17,6 +17,8 @@ import { StateCapacitySection } from "../components/StateCapacitySection";
 import { HSDimensionSection } from "../components/HSDimensionSection";
 import { PCTrajectoriesSection } from "../components/PCTrajectoriesSection";
 import { RelatedIndicatorsSection } from "../components/RelatedIndicatorsSection";
+import { PolSettTypologySection } from "../components/PolSettTypologySection";
+import { PolSettExplorer } from "../components/PolSettExplorer";
 
 const DEFAULT_ISO = "PAK";
 const DEFAULT_N_PEERS = 5;
@@ -211,6 +213,14 @@ export function CountryProfilePage() {
       />
 
       <RelatedIndicatorsSection
+        focus={focus}
+        peers={peerList}
+        growthRecord={growth[focus.iso3] ?? null}
+      />
+
+      <PolSettTypologySection focus={focus} peers={peerList} />
+
+      <PolSettExplorer
         focus={focus}
         peers={peerList}
         growthRecord={growth[focus.iso3] ?? null}
