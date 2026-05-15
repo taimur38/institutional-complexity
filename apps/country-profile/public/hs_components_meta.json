@@ -1,0 +1,146 @@
+{
+  "source": "Hanson & Sigman (2021), replication archive (Harvard Dataverse DOI 10.7910/DVN/IFZXQX, CC0)",
+  "citation": "Hanson, Jonathan K. and Rachel Sigman. 2021. 'Leviathan's Latent Dimensions: Measuring State Capacity for Comparative Political Research.' Journal of Politics 83(4): 1495–1510.",
+  "start_year": 1960,
+  "end_year": 2015,
+  "dimensions": {
+    "extractive": {
+      "key": "extractive",
+      "label": "Extractive capacity",
+      "description": "The state's ability to extract resources — chiefly tax revenue — from society. Motivated by Tilly (1990), Levi (1988), and Besley & Persson (2009). H&S follow Lieberman (2002) in distinguishing administratively complex tax bases from easy-to-collect ones.",
+      "default": "taxrev_gdp",
+      "indicators": [
+        {
+          "tag": "taxrev_gdp",
+          "label": "Total tax revenue (% of GDP)",
+          "source": "ICTD / IMF / OECD",
+          "description": "Overall extractive effort. Excludes nontax revenues (resource rents, trade taxes don't require the enforcement and information apparatus that taxation of domestic activity does)."
+        },
+        {
+          "tag": "tax_inc_tax",
+          "label": "Income taxes (% of total taxes)",
+          "source": "ICTD / IMF",
+          "description": "Reliance on administratively complex tax bases — income, property, consumption — that require record-keeping and a sophisticated bureaucracy. Higher share signals stronger administrative reach as well as extractive depth."
+        },
+        {
+          "tag": "tax_trade_tax",
+          "label": "Trade taxes (% of total taxes)",
+          "source": "ICTD / IMF",
+          "description": "Inverse signal — trade taxes are cheap to collect at the border. Heavy reliance on them indicates the state lacks the apparatus to tax domestic activity. Enters the H&S model with a negative loading."
+        },
+        {
+          "tag": "irai_erm",
+          "label": "Efficiency of revenue mobilization (CPIA)",
+          "source": "World Bank CPIA",
+          "description": "Expert-coded rating of how efficiently the state mobilizes revenue. IDA-eligible countries only, 2005-2015."
+        },
+        {
+          "tag": "v2stfisccap",
+          "label": "Fiscal capacity (V-Dem)",
+          "source": "V-Dem v9",
+          "description": "Expert assessment of the extent to which the state can fund itself through taxes of greater administrative complexity. A direct V-Dem analogue of the Lieberman logic."
+        }
+      ]
+    },
+    "coercive": {
+      "key": "coercive",
+      "label": "Coercive capacity",
+      "description": "The state's monopoly on legitimate violence and the institutionalization of the means of coercion. H&S pair quantitative personnel/spending measures with expert-coded indicators of order and 'stateness', warning that raw force size can signal either capacity or insecurity.",
+      "default": "milexpercap",
+      "indicators": [
+        {
+          "tag": "milexpercap",
+          "label": "Military expenditures per capita (log)",
+          "source": "SIPRI / COW",
+          "description": "Logged USD per capita. Resources devoted to military capability — logging dampens influence of oil-state and war-economy outliers."
+        },
+        {
+          "tag": "milpercap",
+          "label": "Military personnel per 1,000 (log)",
+          "source": "COW / WDI",
+          "description": "Logged size of armed forces relative to population. Long-standing Correlates-of-War measure of coercive reach."
+        },
+        {
+          "tag": "policecap",
+          "label": "Police officers per 1,000 (log)",
+          "source": "UN Office on Drugs and Crime",
+          "description": "Logged size of the internal security apparatus. Distinguishes domestic order maintenance from external defense."
+        },
+        {
+          "tag": "bti_mo",
+          "label": "Monopoly on use of force (BTI)",
+          "source": "Bertelsmann Transformation Index",
+          "description": "BTI expert rating of the degree to which the state actually holds a monopoly on legitimate violence across its territory. Note: the H&S replication column ranges 0–18 (a non-standard rescaling); for the canonical BTI 1–10 series see the BTI Monopoly on Use of Force entry under Explore related indicators."
+        },
+        {
+          "tag": "v2terr",
+          "label": "State authority over territory",
+          "source": "V-Dem v9",
+          "description": "Percentage of territory controlled by the central state, converted via the inverse cumulative normal. Captures 'stateness' in the territorial sense."
+        },
+        {
+          "tag": "StateHist50s",
+          "label": "State antiquity index",
+          "source": "Bockstette, Chanda & Putterman (2002), extended by H&S",
+          "description": "Historical depth of state institutions on a given territory (50-year discounting). Components: presence of a state, share of territory controlled, sovereignty. Long-run capacity to hold territory as the deepest indicator of institutionalized coercion."
+        }
+      ]
+    },
+    "administrative": {
+      "key": "administrative",
+      "label": "Administrative capacity",
+      "description": "The state's ability to formulate policy, deliver services, keep records, and execute decisions through a professional bureaucracy. H&S pull in component-level expert ratings plus a distinct cluster of information-gathering indicators that capture the state's ability to see its own population.",
+      "default": "v2clrspct",
+      "indicators": [
+        {
+          "tag": "v2clrspct",
+          "label": "Rigorous and impartial public administration",
+          "source": "V-Dem v9",
+          "description": "Expert survey ratings of whether public officials respect the law rigorously and impartially — the rule-of-law-in-administration dimension of Weberian bureaucracy."
+        },
+        {
+          "tag": "AdmEffic",
+          "label": "Administrative efficiency (Adelman & Morris)",
+          "source": "Adelman & Morris (1967)",
+          "description": "Early cross-national rating of administrative apparatus efficiency. Covers only 1960-62 but is one of very few series reaching that far back."
+        },
+        {
+          "tag": "weberian",
+          "label": "Weberianness (Rauch & Evans)",
+          "source": "Rauch & Evans (2000)",
+          "description": "Index of meritocratic recruitment and career stability in the core economic bureaucracy. The operational benchmark for 'Weberian' bureaucracies. 34 countries, 1970-90."
+        },
+        {
+          "tag": "irai_qbfm",
+          "label": "Quality of budgetary & financial management (CPIA)",
+          "source": "World Bank CPIA",
+          "description": "Expert rating of technical competence of fiscal management. IDA-eligible countries only, 2005-2015."
+        },
+        {
+          "tag": "irai_qpa",
+          "label": "Quality of public administration (CPIA)",
+          "source": "World Bank CPIA",
+          "description": "Expert rating of broader public-administration capability — policy coordination, civil service, service delivery. IDA-eligible countries only."
+        },
+        {
+          "tag": "censusfreq",
+          "label": "Census frequency",
+          "source": "UN census records",
+          "description": "Annualised frequency of national censuses, computed by looking forward and backward from each year to the nearest census records. Higher values = more frequent censuses = stronger information capacity. Range in the data ≈ 0.1–2.4."
+        },
+        {
+          "tag": "infcap",
+          "label": "Information capacity (Brambor et al.)",
+          "source": "Brambor et al. (2020)",
+          "description": "Composite of whether the state operates a statistical agency, civil register, and population register, plus its capabilities for producing a census and a statistical yearbook."
+        },
+        {
+          "tag": "wbstat",
+          "label": "Statistical capacity (World Bank)",
+          "source": "World Bank",
+          "description": "Extensiveness of national statistical systems. 2004-2015."
+        }
+      ]
+    }
+  }
+}

@@ -114,6 +114,74 @@ export type StateCapacityMeta = {
   };
 };
 
+// Hanson & Sigman (2021) component indicators — the 21 series that feed
+// the latent `Capacity` factor, organised into three dimensions. Per-country
+// files ship a sparse map of `tag -> ScalarPoint[]` (a series is omitted
+// when the country has no observations for that indicator).
+export type HSDimensionKey = "extractive" | "coercive" | "administrative";
+
+export type HSIndicator = {
+  tag: string;
+  label: string;
+  source: string;
+  description: string;
+};
+
+export type HSDimension = {
+  key: HSDimensionKey;
+  label: string;
+  description: string;
+  default: string;
+  indicators: HSIndicator[];
+};
+
+export type HSComponentsMeta = {
+  source: string;
+  citation: string;
+  start_year: number;
+  end_year: number;
+  dimensions: Record<HSDimensionKey, HSDimension>;
+};
+
+// Shared shape for any "wide" per-country indicator file: a sparse map of
+// `tag -> ScalarPoint[]`. Used both by the H&S 21-indicator section and the
+// "Explore related indicators" section.
+export type IndicatorSeriesRecord = {
+  iso3: string;
+  series: Record<string, ScalarPoint[]>;
+};
+
+export type HSComponentsRecord = IndicatorSeriesRecord;
+
+// "Explore related indicators" — capacity-adjacent series compiled from
+// macro_df where possible and supplemented from the H&S replication archive.
+export type RelatedIndicatorDirection = "positive" | "negative";
+
+export type RelatedIndicator = {
+  tag: string;
+  label: string;
+  source: string;
+  // Verbatim description from the macro_df data dictionary (for macro_df-sourced
+  // indicators) or the .dta variable label (for H&S replication-sourced
+  // indicators). Treated as the authoritative attribution.
+  dict_label: string;
+  // Editorial expansion — scale, coverage, methodology — written for this
+  // dashboard. Not verbatim from any source.
+  description: string;
+  group: string;
+  direction: RelatedIndicatorDirection;
+};
+
+export type RelatedIndicatorsMeta = {
+  source: string;
+  description: string;
+  default: string;
+  groups: string[];
+  indicators: RelatedIndicator[];
+};
+
+export type RelatedIndicatorsRecord = IndicatorSeriesRecord;
+
 // Pooled-panel PCA scores — one row per (ISO3, year), wide across the
 // first five components. Loaded from pc_scores.parquet.
 export type PCKey = "pc1" | "pc2" | "pc3" | "pc4" | "pc5";

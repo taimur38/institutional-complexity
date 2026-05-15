@@ -1,0 +1,194 @@
+{
+  "source": "macro_df (glmacro_master_alldata.parquet, Growth Lab) for indicators with broad coverage; Hanson & Sigman (2021) replication archive (Harvard Dataverse DOI 10.7910/DVN/IFZXQX) for the five series not in macro_df.",
+  "description": "Capacity-adjacent indicators that did NOT enter the Hanson & Sigman latent factor. Most appeared in their Table 3 as convergent-validity checks; the rest are governance / quality-of-government indices with good coverage. The version with the broadest temporal coverage was selected for each indicator.",
+  "default": "icrg_qog",
+  "groups": [
+    ["Worldwide Governance Indicators (WGI)"],
+    ["World Bank CPIA (IDA countries only)"],
+    ["Bertelsmann Transformation Index (BTI)"],
+    ["Cross-source composites"],
+    ["Other capacity indicators"]
+  ],
+  "indicators": [
+    {
+      "tag": "wgi_gee",
+      "label": "Government effectiveness",
+      "source": "Kaufmann, Kraay & Mastruzzi (World Bank)",
+      "dict_label": "Government Effectiveness, Estimate",
+      "description": "Captures perceptions of public-service quality, civil-service independence from political pressure, and the quality and credibility of policy formulation and implementation. Standard-normal score, approximately -2.5 to +2.5.",
+      "group": "Worldwide Governance Indicators (WGI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "wgi_rle",
+      "label": "Rule of law",
+      "source": "Kaufmann, Kraay & Mastruzzi (World Bank)",
+      "dict_label": "Rule of Law, Estimate",
+      "description": "Captures perceptions of contract enforcement, property rights, policing, and the courts, plus the likelihood of crime and violence. Standard-normal score, approximately -2.5 to +2.5.",
+      "group": "Worldwide Governance Indicators (WGI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "wgi_rqe",
+      "label": "Regulatory quality",
+      "source": "Kaufmann, Kraay & Mastruzzi (World Bank)",
+      "dict_label": "Regulatory Quality, Estimate",
+      "description": "Captures perceptions of the government's ability to formulate and implement sound regulations that promote private-sector development. Standard-normal score, approximately -2.5 to +2.5.",
+      "group": "Worldwide Governance Indicators (WGI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "wgi_cce",
+      "label": "Control of corruption",
+      "source": "Kaufmann, Kraay & Mastruzzi (World Bank)",
+      "dict_label": "Control of Corruption, Estimate",
+      "description": "Captures perceptions of the extent to which public power is exercised for private gain — petty and grand corruption plus state capture by elites. Standard-normal score, approximately -2.5 to +2.5.",
+      "group": "Worldwide Governance Indicators (WGI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "wgi_vae",
+      "label": "Voice and accountability",
+      "source": "Kaufmann, Kraay & Mastruzzi (World Bank)",
+      "dict_label": "Voice and Accountability, Estimate",
+      "description": "Captures perceptions of citizens' ability to participate in selecting their government, plus freedoms of expression, association, and media. Standard-normal score, approximately -2.5 to +2.5.",
+      "group": "Worldwide Governance Indicators (WGI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "wgi_pve",
+      "label": "Political stability and absence of violence",
+      "source": "Kaufmann, Kraay & Mastruzzi (World Bank)",
+      "dict_label": "Political Stability and Absence of Violence/Terrorism, Estimate",
+      "description": "Captures perceptions of the likelihood that the government will be destabilised or overthrown by unconstitutional or violent means, including politically-motivated violence and terrorism. Standard-normal score, approximately -2.5 to +2.5.",
+      "group": "Worldwide Governance Indicators (WGI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "cpia_pubs",
+      "label": "Public sector management & institutions (cluster avg)",
+      "source": "World Bank CPIA",
+      "dict_label": "CPIA public sector management and institutions cluster average (1=low to 6=high)",
+      "description": "Cluster average of the five CPIA public-sector criteria: property rights and rule-based governance; budgetary and financial management; revenue mobilisation efficiency; quality of public administration; transparency, accountability and corruption. IDA-eligible (low-income) countries only.",
+      "group": "World Bank CPIA (IDA countries only)",
+      "direction": "positive"
+    },
+    {
+      "tag": "cpia_irai",
+      "label": "IDA Resource Allocation Index (CPIA overall)",
+      "source": "World Bank CPIA",
+      "dict_label": "IDA resource allocation index (1=low to 6=high)",
+      "description": "The overall CPIA composite: average of 16 criteria across economic management, structural policies, social inclusion/equity, and public-sector management. IDA uses it to allocate concessional lending. IDA-eligible countries only.",
+      "group": "World Bank CPIA (IDA countries only)",
+      "direction": "positive"
+    },
+    {
+      "tag": "bti_st",
+      "label": "Stateness",
+      "source": "Bertelsmann Stiftung",
+      "dict_label": "Stateness",
+      "description": "BTI composite of monopoly on use of force, state identity, freedom from religious-dogma interference, and basic administration. 1 (low) to 10 (high). Developing and transitioning countries only.",
+      "group": "Bertelsmann Transformation Index (BTI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "bti_rol",
+      "label": "Rule of law",
+      "source": "Bertelsmann Stiftung",
+      "dict_label": "Rule of Law",
+      "description": "BTI sub-index of separation of powers, judicial independence, prosecution of office abuse, and civil rights. 1 (low) to 10 (high).",
+      "group": "Bertelsmann Transformation Index (BTI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "bti_gp",
+      "label": "Governance performance (management index)",
+      "source": "Bertelsmann Stiftung",
+      "dict_label": "Governance Performance",
+      "description": "BTI Management Index: steering capability, resource efficiency, consensus-building, and international cooperation. 1 (low) to 10 (high).",
+      "group": "Bertelsmann Transformation Index (BTI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "bti_ba",
+      "label": "Basic administration",
+      "source": "Bertelsmann Stiftung",
+      "dict_label": "Basic Administration",
+      "description": "BTI sub-component of stateness — whether functioning administrative structures exist throughout the country to provide basic public services. 1 (low) to 10 (high).",
+      "group": "Bertelsmann Transformation Index (BTI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "bti_muf",
+      "label": "Monopoly on use of force",
+      "source": "Bertelsmann Stiftung",
+      "dict_label": "Monopoly on the Use of Force",
+      "description": "BTI sub-component of stateness — degree to which the state's monopoly on legitimate violence is established nation-wide. 1 (low) to 10 (high).",
+      "group": "Bertelsmann Transformation Index (BTI)",
+      "direction": "positive"
+    },
+    {
+      "tag": "ti_cpi",
+      "label": "Corruption Perceptions Index",
+      "source": "Transparency International",
+      "dict_label": "Corruption Perceptions Index",
+      "description": "Composite of expert and business surveys on perceived public-sector corruption. Pre-2012 the scale was 0–10; from 2012 onwards 0–100 (higher = cleaner). The 2011/2012 jump is an instrument change, not a behavioural change.",
+      "group": "Cross-source composites",
+      "direction": "positive"
+    },
+    {
+      "tag": "icrg_qog",
+      "label": "ICRG quality of government composite",
+      "source": "PRS Group ICRG via QoG Institute",
+      "dict_label": "ICRG Indicator of Quality of Government",
+      "description": "Mean of three PRS International Country Risk Guide sub-indicators — corruption, law and order, and bureaucratic quality — rescaled 0–1 (higher = better). Deepest panel of any QoG composite: 1984 onwards, >5,000 country-years.",
+      "group": "Cross-source composites",
+      "direction": "positive"
+    },
+    {
+      "tag": "qs_impar",
+      "label": "Impartial public administration (Rothstein & Teorell)",
+      "source": "QoG Institute expert survey, Rothstein & Teorell (2008)",
+      "dict_label": "Impartial Public Administration",
+      "description": "Expert assessment of whether public officials apply the same procedures to similar cases regardless of who is involved. Cross-sectional QoG survey, ~50 countries, single round c. 2008.",
+      "group": "Other capacity indicators",
+      "direction": "positive"
+    },
+    {
+      "tag": "hendrix_rl",
+      "label": "Rational-legal state capacity (Hendrix 2010)",
+      "source": "Hendrix (2010), via H&S replication archive",
+      "dict_label": "Rational-Legal dimension of state capacity (Hendrix)",
+      "description": "Factor-analytic index combining bureaucratic quality and tax-composition measures to capture the rational-legal (Weberian) dimension of state capacity.",
+      "group": "Other capacity indicators",
+      "direction": "positive"
+    },
+    {
+      "tag": "lnMyers",
+      "label": "Myers age-heaping index (log)",
+      "source": "Lee & Zhang (2017), via H&S replication archive",
+      "dict_label": "log(Myers Index)",
+      "description": "Log of the Myers blended index of age heaping in national censuses. High values = citizens reporting ages ending in 0 or 5 = the state has little reason to know exact ages = LESS information capacity. Inverse signal.",
+      "group": "Other capacity indicators",
+      "direction": "negative"
+    },
+    {
+      "tag": "ffp_publicserv",
+      "label": "Public services indicator (FSI)",
+      "source": "Fund for Peace Fragile States Index, via H&S replication",
+      "dict_label": "Public Services Delivery score (inverted)",
+      "description": "FSI sub-component rating the state's failure to deliver basic public goods — water, sanitation, electricity, transport, education, health. Higher = worse delivery. Inverse signal.",
+      "group": "Other capacity indicators",
+      "direction": "negative"
+    },
+    {
+      "tag": "ffp_fsi",
+      "label": "Fragile States Index",
+      "source": "Fund for Peace, via H&S replication",
+      "dict_label": "Fragile States Index",
+      "description": "Aggregate fragility score across 12 social, economic, and political indicators (range ~18–115). Higher = more fragile. Inverse signal.",
+      "group": "Other capacity indicators",
+      "direction": "negative"
+    }
+  ]
+}

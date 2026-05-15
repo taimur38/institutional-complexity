@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import type { Country, GrowthIndex, PeersIndex } from "../types";
+import type {
+  Country,
+  GrowthIndex,
+  HSComponentsMeta,
+  PeersIndex,
+} from "../types";
 import { CountryPicker } from "../components/CountryPicker";
 import { PeerSection } from "../components/PeerSection";
 import { PeerAnomaliesSection } from "../components/PeerAnomaliesSection";
@@ -9,7 +14,9 @@ import { VDemSection } from "../components/VDemSection";
 import { VDemExplorer } from "../components/VDemExplorer";
 import { BdmSection } from "../components/BdmSection";
 import { StateCapacitySection } from "../components/StateCapacitySection";
+import { HSDimensionSection } from "../components/HSDimensionSection";
 import { PCTrajectoriesSection } from "../components/PCTrajectoriesSection";
+import { RelatedIndicatorsSection } from "../components/RelatedIndicatorsSection";
 
 const DEFAULT_ISO = "PAK";
 const DEFAULT_N_PEERS = 5;
@@ -21,6 +28,7 @@ export function CountryProfilePage() {
   const [countries, setCountries] = useState<Country[] | null>(null);
   const [peers, setPeers] = useState<PeersIndex | null>(null);
   const [growth, setGrowth] = useState<GrowthIndex | null>(null);
+  const [hsMeta, setHsMeta] = useState<HSComponentsMeta | null>(null);
   const [peerIsos, setPeerIsos] = useState<string[]>([]);
 
   // Load reference data once.
@@ -34,6 +42,9 @@ export function CountryProfilePage() {
       setPeers(p);
       setGrowth(g);
     });
+    fetch("/hs_components_meta.json")
+      .then((r) => r.json() as Promise<HSComponentsMeta>)
+      .then(setHsMeta);
   }, []);
 
   // Normalize the URL — redirect "" → /country/PAK, lowercase → uppercase.
@@ -147,13 +158,59 @@ export function CountryProfilePage() {
         growthRecord={growth[focus.iso3] ?? null}
       />
 
-      <StateCapacitySection
+      <section className="mt-12 space-y-8">
+        <div>
+          <h2 className="text-xl font-semibold">State capacity</h2>
+          <p className="mt-1 text-sm text-gl-muted">
+            Hanson &amp; Sigman (2021) treat state capacity as three
+            interrelated dimensions — extractive, coercive, and administrative —
+            which empirically collapse into a single latent factor. Below: the
+            aggregate latent indicator, then each dimension separately, with
+            indicator pickers drawn from the 21 component series H&amp;S
+            assembled. Coverage 1960–2015.
+          </p>
+        </div>
+
+        <StateCapacitySection
+          focus={focus}
+          peers={peerList}
+          growthRecord={growth[focus.iso3] ?? null}
+        />
+
+        {hsMeta && (
+          <>
+            <HSDimensionSection
+              dimension="extractive"
+              meta={hsMeta}
+              focus={focus}
+              peers={peerList}
+              growthRecord={growth[focus.iso3] ?? null}
+            />
+            <HSDimensionSection
+              dimension="coercive"
+              meta={hsMeta}
+              focus={focus}
+              peers={peerList}
+              growthRecord={growth[focus.iso3] ?? null}
+            />
+            <HSDimensionSection
+              dimension="administrative"
+              meta={hsMeta}
+              focus={focus}
+              peers={peerList}
+              growthRecord={growth[focus.iso3] ?? null}
+            />
+          </>
+        )}
+      </section>
+
+      <PCTrajectoriesSection
         focus={focus}
         peers={peerList}
         growthRecord={growth[focus.iso3] ?? null}
       />
 
-      <PCTrajectoriesSection
+      <RelatedIndicatorsSection
         focus={focus}
         peers={peerList}
         growthRecord={growth[focus.iso3] ?? null}

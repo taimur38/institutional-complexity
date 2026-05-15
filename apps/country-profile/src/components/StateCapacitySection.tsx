@@ -35,25 +35,26 @@ export function StateCapacitySection({ focus, peers, growthRecord }: Props) {
 
   if (!meta) {
     return (
-      <section className="mt-12">
-        <h2 className="text-xl font-semibold">State capacity</h2>
+      <div>
+        <h3 className="text-base font-semibold">Latent Leviathan indicator</h3>
         <p className="mt-2 text-sm text-gl-muted">Loading…</p>
-      </section>
+      </div>
     );
   }
 
   return (
-    <section className="mt-12 space-y-4">
+    <div className="space-y-4">
       <div className="flex items-end justify-between gap-4">
         <div>
-          <h2 className="text-xl font-semibold">State capacity</h2>
+          <h3 className="text-base font-semibold">Latent Leviathan indicator</h3>
           <p className="mt-0.5 text-xs text-gl-muted">
-            Hanson &amp; Sigman index ({meta.start_year}–{meta.end_year}).
+            Bayesian latent factor estimated jointly from all 21 component
+            indicators (Hanson &amp; Sigman 2021, {meta.start_year}–{meta.end_year}).
             Shaded band shows ±1 posterior SD for {focus.name}. Vertical
             dashes mark growth-break years.
           </p>
         </div>
-        <label className="flex cursor-pointer items-center gap-2 text-xs">
+        <label className="flex shrink-0 cursor-pointer items-center gap-2 text-xs">
           <input
             type="checkbox"
             checked={showPeers}
@@ -107,6 +108,6 @@ export function StateCapacitySection({ focus, peers, growthRecord }: Props) {
         peers={peerSeries}
         breakYears={breakYears}
       />
-    </section>
+    </div>
   );
 }
